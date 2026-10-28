@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { ROUTINE_STEPS, type Frequency, type RoutineStep } from '../catalog/catalog.vocabulary'
 import { GOALS, type Goal } from '../goals/goals.vocabulary'
 import { maxNewProductsFor } from './routines.rules'
-import { spliceFixed, stableMerge } from './routines.stable'
+import { sameProductBefore, spliceFixed, stableMerge } from './routines.stable'
 import type { Routine, RoutineSkeleton, ShelfVerdict, SkeletonCandidate, SkeletonGap, SkeletonShelfProduct, StoredRoutineStep, StoredTaper } from './routines.types'
 
 // The stable merge is what keeps a started routine steady (spec #189, pr2-design-notes.md). After Start, a rebuild must not reshuffle what still works: a previous step
@@ -580,5 +580,37 @@ describe('changedOn: a fixed step keeps its own date', () => {
     const result = spliceFixed(merge, written)
 
     expect(result.steps.map((e) => [e.step, e.fixedFrom === null, e.changedOn])).toEqual([['cleanse', true, null], ['treat', false, CHANGED], ['moisturise', false, null], ['protect', false, CHANGED]])
+  })
+})
+
+// ---- sameProductBefore: whether a step the writer wrote is a change of product (spec #233, PR 4a) ----
+describe('sameProductBefore: the previous step that holds the same product', () => {
+  const before = (): StoredRoutineStep[] => [
+    entry('cleanse', { kind: 'shelf', id: 'cleanser-1' }, 'am', []),
+    entry('treat', { kind: 'candidate', code: 'tr-1' }, 'pm', []),
+    entry('moisturise', { kind: 'none' }, 'am', []),
+  ]
+  const now = (step: RoutineStep, product: StoredRoutineStep['product']) => entry(step, product, 'am', [])
+
+  it('finds the step with the same shelf entry, the same recommended code, or "use what you have" again', () => {
+    expect(sameProductBefore(before(), now('cleanse', { kind: 'shelf', id: 'cleanser-1' }), {})?.step).toBe('cleanse')
+    expect(sameProductBefore(before(), now('treat', { kind: 'candidate', code: 'tr-1' }), {})?.step).toBe('treat')
+    expect(sameProductBefore(before(), now('moisturise', { kind: 'none' }), {})?.step).toBe('moisturise')
+  })
+
+  it('finds a recommended product the person has got as their own shelf entry of it', () => {
+    expect(sameProductBefore(before(), now('treat', { kind: 'shelf', id: 'serum-own' }), { 'tr-1': 'serum-own' })?.step).toBe('treat')
+  })
+
+  it('finds nothing when the product at the step changed, was another shelf entry, or the step is new', () => {
+    expect(sameProductBefore(before(), now('cleanse', { kind: 'shelf', id: 'cleanser-2' }), {})).toBeUndefined()
+    expect(sameProductBefore(before(), now('treat', { kind: 'candidate', code: 'tr-2' }), {})).toBeUndefined()
+    expect(sameProductBefore(before(), now('treat', { kind: 'shelf', id: 'serum-own' }), { 'tr-2': 'serum-own' })).toBeUndefined()
+    expect(sameProductBefore(before(), now('moisturise', { kind: 'candidate', code: 'mo-1' }), {})).toBeUndefined()
+    expect(sameProductBefore(before(), now('protect', { kind: 'none' }), {})).toBeUndefined()
+  })
+
+  it('does not match the same product at another step', () => {
+    expect(sameProductBefore(before(), now('moisturise', { kind: 'candidate', code: 'tr-1' }), {})).toBeUndefined()
   })
 })

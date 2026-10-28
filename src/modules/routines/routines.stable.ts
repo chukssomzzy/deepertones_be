@@ -63,6 +63,18 @@ const linksHeld = (skeleton: RoutineSkeleton, step: RoutineStep, product: Routin
   return found && linksOf(found)
 }
 
+/**
+ * The previous step at `entry`'s step that holds the same product, or undefined when the product at that step changed or the step is new. The same product is the same shelf entry,
+ * the same recommended code, "use what you have" again, or a recommended product the person has since got (`onShelf`: its code to the shelf entry of the same product).
+ */
+export const sameProductBefore = (previous: readonly StoredRoutineStep[], entry: StoredRoutineStep, onShelf: StableCarry['onShelf']): StoredRoutineStep | undefined =>
+  previous.find(({ step, product }) => {
+    if (step !== entry.step) return false
+    if (product.kind === 'shelf') return entry.product.kind === 'shelf' && entry.product.id === product.id
+    if (product.kind === 'candidate') return (entry.product.kind === 'candidate' && entry.product.code === product.code) || (entry.product.kind === 'shelf' && onShelf[product.code] === entry.product.id)
+    return entry.product.kind === 'none'
+  })
+
 export const stableMerge = (previous: StablePrevious, skeleton: RoutineSkeleton, carry: StableCarry): StableMerge => {
   const checking = withCarried(skeleton, carry.candidates)
   const goalChanged = previous.goal !== skeleton.goal
