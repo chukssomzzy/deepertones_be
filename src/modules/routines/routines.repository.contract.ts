@@ -91,10 +91,10 @@ export type RoutinesContractSetup = {
   retireCode: (code: string, updatedInVersion: number) => Promise<void>
 }
 
-// A stored step is a routine entry plus `gotIt` and `fixedFrom`. One of each product kind, so a JSON column cannot quietly drop a variant: a shelf
+// A stored step is a routine entry plus `gotIt`, `fixedFrom` and `changedOn` (the calendar day the step's product last changed, as a Date; null means day 1). One of each product kind, so a JSON column cannot quietly drop a variant: a shelf
 // product the version carried over unchanged, a candidate the user has got, and "use what you have".
 const stepsOf = (): Appended['steps'] => [
-  { step: 'cleanse', product: { kind: 'shelf', id: 'entry-1' }, frequency: 'am-pm', reason: 'You already use this and it suits your goal.', grounding: [], gotIt: false, fixedFrom: 'version-0' },
+  { step: 'cleanse', product: { kind: 'shelf', id: 'entry-1' }, frequency: 'am-pm', reason: 'You already use this and it suits your goal.', grounding: [], gotIt: false, fixedFrom: 'version-0', changedOn: null },
   {
     step: 'treat',
     product: { kind: 'candidate', code: 'SERUM-1' },
@@ -103,9 +103,11 @@ const stepsOf = (): Appended['steps'] => [
     grounding: ['https://example.org/evidence/serum-1', 'https://example.org/ingredients/serum-1'],
     gotIt: true,
     fixedFrom: null,
+    // A calendar date (the UTC midnight of a local day) and a step with none: a JSON column keeps the date as text, so the repository has to turn it back.
+    changedOn: new Date(BASE.getTime() - 3 * DAY),
   },
-  { step: 'moisturise', product: { kind: 'none' }, frequency: 'am', reason: 'Use what you have for now.', grounding: [], gotIt: false, fixedFrom: null },
-  { step: 'protect', product: { kind: 'shelf', id: 'entry-2' }, frequency: 'am', reason: 'Sunscreen keeps dark marks from coming back.', grounding: ['https://example.org/evidence/spf'], gotIt: false, fixedFrom: 'version-0' },
+  { step: 'moisturise', product: { kind: 'none' }, frequency: 'am', reason: 'Use what you have for now.', grounding: [], gotIt: false, fixedFrom: null, changedOn: null },
+  { step: 'protect', product: { kind: 'shelf', id: 'entry-2' }, frequency: 'am', reason: 'Sunscreen keeps dark marks from coming back.', grounding: ['https://example.org/evidence/spf'], gotIt: false, fixedFrom: 'version-0', changedOn: new Date(BASE.getTime() - DAY) },
 ]
 
 // One step-down under way (a start date, to the millisecond) and one not started (null): a JSON column must give both back as they were.
@@ -257,6 +259,30 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
         expect(row.steps.map((s) => s.gotIt)).toEqual([false, true, false, false])
         expect(row.steps.map((s) => s.fixedFrom)).toEqual(['version-0', null, null, 'version-0'])
         expect(row.tapers).toEqual(tapersOf())
+      })
+
+      it('gives each step\'s changedOn back as a Date, or null when it has none: a JSON column keeps text', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(readyRow(profileId, crypto.randomUUID(), BASE))
+
+        const row = await latestOf(repository, profileId)
+
+        expect(row.steps.map((s) => s.changedOn)).toEqual([null, new Date(BASE.getTime() - 3 * DAY), null, new Date(BASE.getTime() - DAY)])
+        expect(row.steps[1]!.changedOn).toBeInstanceOf(Date)
+      })
+
+      it('reads a step stored before the field existed as changedOn null, which means day 1', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        // A row an older build wrote: its steps have no changedOn at all.
+        const legacy = stepsOf().map(({ changedOn: _changedOn, ...step }) => step) as unknown as Appended['steps']
+        await repository.append(readyRow(profileId, crypto.randomUUID(), BASE, { steps: legacy }))
+
+        const row = await latestOf(repository, profileId)
+
+        expect(row.steps.map((s) => s.changedOn)).toEqual([null, null, null, null])
+        expect(row.steps.map((s) => s.step)).toEqual(['cleanse', 'treat', 'moisturise', 'protect'])
       })
 
       it('stores a pending version with no routine in it: no steps, no step-downs, no expectation', async () => {
@@ -1527,6 +1553,7 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
         grounding: [],
         gotIt: false,
         fixedFrom: null,
+        changedOn: null,
       })
       const versionHolding = (profileId: string, id: string, createdAt: Date, codes: string[], over: Partial<Appended> = {}): Appended =>
         readyRow(profileId, id, createdAt, { catalogVersion: 7, steps: [...codes.map((code, i) => candidateStep(i === 0 ? 'treat' : 'moisturise', code)), stepsOf()[0]!, stepsOf()[3]!], ...over })

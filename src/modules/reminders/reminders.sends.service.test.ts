@@ -104,11 +104,12 @@ const AMARA_OTHER_PROFILE = actor('user-amara', 'profile-amara-2')
 const TOLU = actor('user-tolu', 'profile-tolu-1')
 const NGOZI = actor('user-ngozi', 'profile-ngozi-1')
 
-type PlanEntry = { step: RoutineStep; title: string; frequency: Frequency }
+// `anchor` (spec #233, PR 4a) is the day a bringing-back entry's count starts ('YYYY-MM-DD'); an entry without one counts from the plan's day 1.
+type PlanEntry = { step: RoutineStep; title: string; frequency: Frequency; anchor?: string }
 type StepDownChange = { day: string; title: string; line: string }
 type Plan = { dayOne: string; morning: PlanEntry[]; evening: PlanEntry[]; stepDownChanges: StepDownChange[] }
 type Streak = { days: number; since: string | null }
-const entry = (step: RoutineStep, title: string, frequency: Frequency): PlanEntry => ({ step, title, frequency })
+const entry = (step: RoutineStep, title: string, frequency: Frequency, anchor?: string): PlanEntry => ({ step, title, frequency, ...(anchor === undefined ? {} : { anchor }) })
 
 const CLEANSER = entry('cleanse', 'Cleanser', 'am')
 const MOISTURISER = entry('moisturise', 'Moisturiser', 'am-pm')
@@ -513,6 +514,66 @@ describe('ReminderSendsService.sendDue: the evening push', () => {
     expect(await sendDue(EVENING)).toBe(0)
 
     expect(push.sent).toEqual([])
+  })
+})
+
+describe('ReminderSendsService.sendDue: the evening push of an entry with an anchor day (an entry being brought back)', () => {
+  const EVENING = utc(20) // 21:00 in Lagos, on TODAY
+  const DAILY = entry('cleanse', 'Cleanser', 'pm')
+  // Day 1 is ten days ago: counted from day 1, an alternate-days entry is due today (10 is even) and a weekly one is not (10 is not a multiple of 7). An anchor moves the count.
+  const withAnchored = (anchored: PlanEntry, dayOne = day(-10)) => ({ dayOne, evening: [DAILY, anchored] })
+
+  it.each([
+    [-1, false],
+    [-2, true],
+    [-3, false],
+    [-4, true],
+    [0, true],
+  ])('lists an alternate-days entry whose anchor is %i days from today: %s, counted from the anchor and not from day 1', async (anchorOffset, listed) => {
+    await amara({}, withAnchored(entry('treat', 'Treatment', 'alternate-days', day(anchorOffset))))
+
+    await sendDue(EVENING)
+
+    expect(titles()).toEqual([listed ? 'Cleanser, Treatment' : 'Cleanser'])
+  })
+
+  it('counts from the anchor where day 1 would say the opposite: day 1 nine days ago makes today an off day, an anchor four days ago an on day', async () => {
+    await amara({}, withAnchored(entry('treat', 'Treatment', 'alternate-days', day(-4)), day(-9)))
+
+    await sendDue(EVENING)
+
+    expect(titles()).toEqual(['Cleanser, Treatment'])
+  })
+
+  it.each([
+    [-7, true],
+    [-14, true],
+    [-6, false],
+    [-8, false],
+    [0, true],
+  ])('lists a weekly entry whose anchor is %i days from today: %s, whatever day 1 says', async (anchorOffset, listed) => {
+    // Day 1 is chosen to say the opposite of the anchor every time: seven days ago is a weekly day, ten days ago is not.
+    await amara({}, withAnchored(entry('treat', 'Treatment', 'weekly', day(anchorOffset)), listed ? day(-10) : day(-7)))
+
+    await sendDue(EVENING)
+
+    expect(titles()).toEqual([listed ? 'Cleanser, Treatment' : 'Cleanser'])
+  })
+
+  it('still counts an entry with no anchor from day 1, beside one that has one', async () => {
+    await amara({}, { dayOne: day(-10), evening: [entry('treat', 'Treatment', 'alternate-days'), entry('moisturise', 'Moisturiser', 'alternate-days', day(-3))] })
+
+    await sendDue(EVENING)
+
+    expect(titles()).toEqual(['Treatment'])
+  })
+
+  it('lists a daily entry with an anchor every day, and never an as-needed one', async () => {
+    await amara({}, { dayOne: day(-10), evening: [entry('cleanse', 'Cleanser', 'pm', day(-1)), entry('treat', 'Treatment', 'as-needed', day(-2))] })
+
+    await sendDue(EVENING)
+
+    expect(titles()).toEqual(['Cleanser'])
   })
 })
 

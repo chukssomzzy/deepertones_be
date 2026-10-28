@@ -35,7 +35,7 @@ import { parseFrame, sseReader, type SseReader } from './sse'
 //   (PR 6: `steps` is gone. Placement and the words are pinned in routines.view.test.ts; this file pins that they reach the wire.)
 //   NotInRoutine = { entryId, title, status: 'stepping-down' | 'left-out', reason }   (null for a version built before the column)
 //   Summary = { goal: { id, label }, keepUsing, useLessOrChange, stepDown: { products: { brand, name }[], message } | null }   (PR 5; null for a version with no stored counts)
-//   Entry = { step, title, when, reason, changed, product }
+//   Entry = { step, title, when, reason, changed, status, product }     (status, spec #233 PR 4a: 'active' | 'paused' | 'held' | 'bringing-back'; the skin-care module is not wired to say otherwise yet, so 'active')
 //   product = { kind: 'own', entryId, brand, name } | { kind: 'recommended', code, brand, name, imageUrl, origin?, price: { min, max, currency } | null, whereSold,
 //             soldInCurrentCountry, soldElsewhere, keyIngredient, strength, notYetGot } | { kind: 'none' }
 //   Taper = { entryId, brand, name, code, kind, whatToExpect, seeAProfessionalIf, steps: { fromWeek, toWeek, frequency, fromDate?, toDate? }[] }
@@ -125,7 +125,7 @@ const errorCodeOf = async (res: Reply) => {
   throw new Error(`expected an error, got ${res.status}`)
 }
 
-type Step = { step: string; title: string; when: string; reason: string; changed: boolean; product: Record<string, any> }
+type Step = { step: string; title: string; when: string; reason: string; changed: boolean; status: string; product: Record<string, any> }
 type NotInRoutine = { entryId: string; title: string; status: string; reason: string }
 type Taper = { entryId: string; brand: string | null; name: string; code: string; kind: string; whatToExpect: string; seeAProfessionalIf: string; steps: Record<string, any>[] }
 type Summary = { goal: { id: string; label: string }; keepUsing: number; useLessOrChange: number; stepDown: { products: { brand: string | null; name: string }[]; message: string } | null }
@@ -321,6 +321,7 @@ const stored = (step: StoredStep['step'], product: StoredStep['product'], freque
   grounding: ['https://internal.example/grounding'],
   gotIt: false,
   fixedFrom: null,
+  changedOn: null,
   ...over,
 })
 let versionCount = 0
@@ -546,6 +547,15 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(version.steps).toHaveLength(4)
     })
 
+    it('marks every entry of both lists with a status, active while nothing has paused or held it', async () => {
+      const { guest } = await withRoutine()
+
+      const body = await readyOf(guest)
+
+      expect([...body.morning, ...body.evening]).toHaveLength(5)
+      expect([...body.morning, ...body.evening].map((entry) => entry.status)).toEqual(Array(5).fill('active'))
+    })
+
     it('lists the steps by when they are used: morning and evening lists in routine order, a step used morning and evening in both, and no list of steps', async () => {
       const { guest } = await withRoutine()
 
@@ -556,7 +566,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(body.morning.map((s) => s.step)).toEqual(['cleanse', 'moisturise', 'protect'])
       expect(body.evening.map((s) => s.step)).toEqual(['treat', 'moisturise'])
       expect(body.morning.find((s) => s.step === 'moisturise')).toEqual(body.evening.find((s) => s.step === 'moisturise'))
-      for (const entry of [...body.morning, ...body.evening]) expect(Object.keys(entry).sort()).toEqual(['changed', 'product', 'reason', 'step', 'title', 'when'])
+      for (const entry of [...body.morning, ...body.evening]) expect(Object.keys(entry).sort()).toEqual(['changed', 'product', 'reason', 'status', 'step', 'title', 'when'])
     })
 
     it('titles each step in plain words: the shelf product and the recommended product with no key ingredient by their step, a recommended one with a key ingredient by it, and "use what you have" by its step', async () => {
@@ -737,6 +747,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
     const INTERNAL = [
       'grounding',
       'fixedFrom',
+      'changedOn',
       'sourceUrls',
       'evidenceUrls',
       'ingredientsSourceUrl',

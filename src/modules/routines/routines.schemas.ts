@@ -45,6 +45,7 @@ const RoutineEntryResponse = z
     title: z.string().openapi({ description: 'The product in plain words ("Gel cleanser", "Niacinamide serum", "Sunscreen"): a capital, no full stop.' }),
     when: z.string().openapi({ description: 'How often, in words for the card: "Every day", "Every other evening", "Once a week" or "When you need it".' }),
     reason: z.string().openapi({ description: 'Why, in words for the user.' }),
+    status: z.enum(['active', 'paused', 'held', 'bringing-back']).openapi({ description: '`active` for a step in the routine as written. `paused`: left out for now. `held`: left out while a hold is open. `bringing-back`: used again at a gentler pace.' }),
     changed: z.boolean().openapi({ description: 'True when this step\'s product or frequency differs from the routine the user was last shown, or that routine had no such step. Always false the first time a routine is shown.' }),
     product: z.discriminatedUnion('kind', [OwnProduct, RecommendedProduct, NoProduct]),
   })

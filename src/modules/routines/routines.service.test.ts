@@ -315,8 +315,8 @@ const errorOf = async (promise: Promise<unknown>) => {
 }
 
 type Row = NonNullable<Awaited<ReturnType<FakeRoutinesRepository['latest']>>>
-/** A step as the user sees it: with the bookkeeping (gotIt, fixedFrom) taken off. */
-const plain = (row: Row) => row.steps.map(({ gotIt: _gotIt, fixedFrom: _fixedFrom, ...entry }) => entry)
+/** A step as the user sees it: with the bookkeeping (gotIt, fixedFrom, changedOn) taken off. */
+const plain = (row: Row) => row.steps.map(({ gotIt: _gotIt, fixedFrom: _fixedFrom, changedOn: _changedOn, ...entry }) => entry)
 const shapeOf = (row: Row) => row.steps.map(({ step, product, frequency }) => ({ step, product, frequency }))
 const FIRST_SHAPE = [
   { step: 'cleanse', product: { kind: 'shelf', id: 'entry-a' }, frequency: 'am' },
@@ -1047,10 +1047,10 @@ describe('RoutineService.build: a writer that gets it wrong', () => {
     expect(row).toMatchObject({ status: 'ready', source: 'rules', model: 'claude-test-model', promptHash: 'prompt-hash-test', writerCalls: 3, writerRetryDueAt: at(10 * MINUTE + DAY), reason: 'first', hintsShown: false })
     // The rules' own routine: fixed words for each step, no grounding, and the same step-down.
     expect(row.steps).toEqual([
-      { step: 'cleanse', product: { kind: 'shelf', id: 'entry-a' }, frequency: 'am', reason: 'Your cleanser, used as it is.', grounding: [], gotIt: false, fixedFrom: null },
-      { step: 'treat', product: { kind: 'candidate', code: 'SERUM-1' }, frequency: 'pm', reason: 'A treatment product, used at a gentle pace.', grounding: [], gotIt: false, fixedFrom: null },
-      { step: 'moisturise', product: { kind: 'candidate', code: 'MOIST-1' }, frequency: 'am-pm', reason: 'A simple moisturiser that keeps the skin soft and comfortable.', grounding: [], gotIt: false, fixedFrom: null },
-      { step: 'protect', product: { kind: 'candidate', code: 'SPF-1' }, frequency: 'am', reason: 'A daily sunscreen that protects the skin from the sun.', grounding: [], gotIt: false, fixedFrom: null },
+      { step: 'cleanse', product: { kind: 'shelf', id: 'entry-a' }, frequency: 'am', reason: 'Your cleanser, used as it is.', grounding: [], gotIt: false, fixedFrom: null, changedOn: null },
+      { step: 'treat', product: { kind: 'candidate', code: 'SERUM-1' }, frequency: 'pm', reason: 'A treatment product, used at a gentle pace.', grounding: [], gotIt: false, fixedFrom: null, changedOn: null },
+      { step: 'moisturise', product: { kind: 'candidate', code: 'MOIST-1' }, frequency: 'am-pm', reason: 'A simple moisturiser that keeps the skin soft and comfortable.', grounding: [], gotIt: false, fixedFrom: null, changedOn: null },
+      { step: 'protect', product: { kind: 'candidate', code: 'SPF-1' }, frequency: 'am', reason: 'A daily sunscreen that protects the skin from the sun.', grounding: [], gotIt: false, fixedFrom: null, changedOn: null },
     ])
     expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: null }])
     expect(row.expectation).not.toBe('')
@@ -1156,7 +1156,8 @@ describe('RoutineService.build: after Start, only what broke changes', () => {
     ])
     const row = await latestRow()
     expect(row).toMatchObject({ id: 'version-2', status: 'ready', reason: 'shelf', source: 'writer', writerCalls: 1 })
-    expect(row.steps[0]).toEqual({ step: 'cleanse', product: { kind: 'candidate', code: 'CLEANSER-1' }, frequency: 'am', reason: 'Written 2: cleanse.', grounding: [], gotIt: false, fixedFrom: null })
+    // Re-picked at 13:00 on the 17th, the day before day 1: stamped day 1, the first day the routine exists.
+    expect(row.steps[0]).toEqual({ step: 'cleanse', product: { kind: 'candidate', code: 'CLEANSER-1' }, frequency: 'am', reason: 'Written 2: cleanse.', grounding: [], gotIt: false, fixedFrom: null, changedOn: DAY_ONE })
     // The fixed steps are the earlier ones whole (words included, not the writer's new words), marked as carried from the version they came from.
     expect(row.steps.slice(1)).toEqual(before.steps.slice(1).map((step) => ({ ...step, fixedFrom: before.id })))
     expect(row.steps.slice(1).map((s) => s.reason)).toEqual(['Written 1: treat.', 'Written 1: moisturise.', 'Written 1: protect.'])
@@ -3414,5 +3415,286 @@ describe('RoutineService.build: the outcome counts are only hints', () => {
     expect(writer.calls[0]!.hintsShown).toBe(false)
     expect(writer.calls[0]!.gaps.flatMap((gap) => gap.candidates.map((c) => c.outcomeHint))).toSatisfy((hints: unknown[]) => hints.every((hint) => hint === null))
     expect(await latestRow()).toMatchObject({ status: 'ready', source: 'writer', hintsShown: false })
+  })
+})
+
+// ---- changedOn: the day each step's product last changed (spec #233, PR 4a) ----
+// A fact the routine starts recording for the skin-care module (which must tell a reaction to a product the person has just started from one to an old habit). It is a calendar
+// date (the UTC midnight of the person's local day, as the step-down dates are) in a JSON column, so there is no migration. Null means day 1. Before Start every step's is null.
+// After Start a step that is new (the writer or the rules re-picked it: `fixedFrom` null) is stamped with the local date of the rebuild, and never earlier than day 1; a step the merge
+// kept (fixed) carries its own through. "I got it" stamps the step whose product has just arrived. A copy that changes no product (got-it, cautions only) keeps every other step's.
+// Start is tapped on the 17th (T0 + 2 days), so day 1 is the 18th; the helpers below name the calendar dates as offsets from T0's day.
+const T0_DAY = new Date(Date.UTC(T0.getUTCFullYear(), T0.getUTCMonth(), T0.getUTCDate()))
+/** The UTC midnight `days` calendar days after T0's day: how a stored date is written. */
+const dateAt = (days: number) => new Date(T0_DAY.getTime() + days * DAY)
+const DAY_ONE = dateAt(3)
+const changedOnOf = (row: Row) => row.steps.map((entry) => entry.changedOn)
+
+describe('RoutineService.build: changedOn before Start', () => {
+  it('is null on every step of the first build, and of a rebuild before Start: null means day 1', async () => {
+    const first = await firstBuild()
+    expect(changedOnOf(first)).toEqual([null, null, null, null])
+    removeShelfProduct('entry-a')
+    setClock(HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await latestRow()
+    expect(row.steps[0]).toMatchObject({ step: 'cleanse', product: { kind: 'candidate', code: 'CLEANSER-1' } })
+    expect(changedOnOf(row)).toEqual([null, null, null, null])
+  })
+
+  it('stays null on a step the rules fill in when the writer fails three times before Start', async () => {
+    script(throws(), throws(), throws())
+
+    await firstBuild()
+
+    expect(changedOnOf(await currentRow())).toEqual([null, null, null, null])
+  })
+})
+
+describe('RoutineService.build: changedOn after Start', () => {
+  it('stamps the step the writer re-picks with the local date of the rebuild, and leaves every step the merge kept as it was', async () => {
+    const before = await started()
+    removeShelfProduct('entry-a')
+    setClock(4 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await latestRow()
+    expect(row.steps[0]).toMatchObject({ step: 'cleanse', fixedFrom: null })
+    expect(row.steps[0]!.changedOn).toEqual(dateAt(4))
+    expect(row.steps.slice(1).map((entry) => [entry.fixedFrom, entry.changedOn])).toEqual(before.steps.slice(1).map((entry) => [before.id, entry.changedOn]))
+  })
+
+  it('stamps a step the rules pick when the writer fails three times, as it does one the writer picks', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    script(throws(), throws(), throws())
+    setClock(4 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await latestRow()
+    expect(row).toMatchObject({ source: 'rules' })
+    expect(changedOnOf(row)).toEqual([dateAt(4), null, null, null])
+  })
+
+  it('carries the date a step already has through a later rebuild that changes another step', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    setClock(4 * DAY + HOUR)
+    await build('shelf')
+    setClock(6 * DAY + HOUR)
+
+    expect(await build('sold-here', { exclude: { step: 'treat', code: 'SERUM-1' } })).toBe('built')
+
+    const row = await latestRow()
+    expect(row.steps.map((entry) => [entry.step, entry.fixedFrom === null])).toEqual([['cleanse', false], ['treat', true], ['moisturise', false], ['protect', false]])
+    expect(changedOnOf(row)).toEqual([dateAt(4), dateAt(6), null, null])
+  })
+
+  // Day 1 is the 18th. A rebuild on the 17th (after the tap, before day 1) stamps the 18th, never the day before the routine began; the 18th is the first day it is stamped as itself.
+  it.each([
+    ['an hour after the tap, the day before day 1', 2 * DAY + HOUR, DAY_ONE],
+    ['the last millisecond before day 1 begins', 2 * DAY + 12 * HOUR - 1, DAY_ONE],
+    ['the first millisecond of day 1', 2 * DAY + 12 * HOUR, DAY_ONE],
+    ['the last millisecond of day 1', 3 * DAY + 12 * HOUR - 1, DAY_ONE],
+    ['the first millisecond of day 2', 3 * DAY + 12 * HOUR, dateAt(4)],
+  ])('stamps %s with the right date, never earlier than day 1', async (_when, offset, expected) => {
+    await started()
+    removeShelfProduct('entry-a')
+    setClock(offset)
+
+    await build('shelf')
+
+    expect((await latestRow()).steps[0]!.changedOn).toEqual(expected)
+  })
+
+  it('stamps the local date in the stored time zone, not the UTC date', async () => {
+    world.zone = LAGOS
+    await started()
+    removeShelfProduct('entry-a')
+    // 2030-06-18 23:30 UTC is 00:30 on the 19th in Lagos (UTC+1): the UTC date would be a day early.
+    setClock(3 * DAY + 11 * HOUR + 30 * MINUTE)
+
+    await build('shelf')
+
+    expect((await latestRow()).steps[0]!.changedOn).toEqual(dateAt(4))
+  })
+
+  it('keeps every date through a rebuild that changes only a step-down: the copy is made without a writer', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    setClock(4 * DAY + HOUR)
+    await build('shelf')
+    const before = await currentRow()
+    saveVerdict(productsOfVerdict().map((p) => (p.entryId === 'entry-b' ? { ...p, verdict: { kind: 'stop' as const, taperTemplateId: 'TPR-STEROID-2' } } : p)))
+    setClock(5 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('built')
+
+    const row = await latestRow()
+    expect(row).toMatchObject({ writerCalls: 0, reason: 'verdict' })
+    expect(changedOnOf(row)).toEqual(changedOnOf(before))
+    expect(changedOnOf(row)).toEqual([dateAt(4), null, null, null])
+  })
+
+  it('reads a routine stored before the field existed as null on every step, and carries null through a rebuild that keeps those steps', async () => {
+    const before = await started()
+    // The version in force is one an older build wrote: its steps have no changedOn at all.
+    const legacySteps = before.steps.map(({ changedOn: _changedOn, ...entry }) => entry) as unknown as Row['steps']
+    await repository.append({ ...before, id: 'version-legacy', createdAt: at(2 * DAY + 30 * MINUTE), readyAt: at(2 * DAY + 30 * MINUTE), steps: legacySteps })
+    expect(changedOnOf(await currentRow())).toEqual([null, null, null, null])
+    removeShelfProduct('entry-a')
+    setClock(4 * DAY + HOUR)
+
+    await build('shelf')
+
+    const row = await latestRow()
+    expect(row.steps.slice(1).map((entry) => [entry.fixedFrom, entry.changedOn])).toEqual([
+      ['version-legacy', null],
+      ['version-legacy', null],
+      ['version-legacy', null],
+    ])
+    expect(row.steps[0]!.changedOn).toEqual(dateAt(4))
+  })
+})
+
+describe('RoutineService.build: changedOn when a step is written again with the same product', () => {
+  // The expectation names a condition, so the gates fail the routine as a whole and nothing is kept: every step comes back from the writer.
+  const WHOLE_FAILURE = 'Most people with rosacea see a change in 8 to 12 weeks.'
+  /** A routine in force that a whole-routine rebuild follows: the version `before`, with these dates on its steps and an expectation the gates refuse. */
+  const failingWholeWith = async (before: Row, dates: (Date | null)[]) => {
+    await repository.append({ ...before, id: 'version-failing', createdAt: at(2 * DAY + 30 * MINUTE), readyAt: at(2 * DAY + 30 * MINUTE), expectation: WHOLE_FAILURE, steps: before.steps.map((entry, i) => ({ ...entry, changedOn: dates[i]! })) })
+  }
+  const swapsTreatTo = (code: string): Answer => (skeleton) => {
+    const routine = routineFrom(skeleton, 'Written')
+    return { ...routine, steps: routine.steps.map((entry) => (entry.step === 'treat' ? { ...entry, product: { kind: 'candidate' as const, code }, frequency: 'alternate-days' as const } : entry)) }
+  }
+
+  it('keeps the date of each step the writer picks again with the same product, null (day 1) included, and stamps only the step whose product changed', async () => {
+    const before = await started()
+    await failingWholeWith(before, [null, dateAt(4), dateAt(5), null])
+    script(swapsTreatTo('SERUM-2'))
+    setClock(6 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await latestRow()
+    expect(row.steps.map((entry) => entry.fixedFrom)).toEqual([null, null, null, null])
+    expect(shapeOf(row).map(({ step, product }) => [step, product])).toEqual([
+      ['cleanse', before.steps[0]!.product],
+      ['treat', { kind: 'candidate', code: 'SERUM-2' }],
+      ['moisturise', before.steps[2]!.product],
+      ['protect', before.steps[3]!.product],
+    ])
+    expect(changedOnOf(row)).toEqual([null, dateAt(6), dateAt(5), null])
+  })
+
+  it('keeps the date of every step when the whole routine is written again and no product changed', async () => {
+    const before = await started()
+    await failingWholeWith(before, [dateAt(3), dateAt(4), dateAt(5), null])
+    setClock(6 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await latestRow()
+    expect(row.steps.map((entry) => entry.fixedFrom)).toEqual([null, null, null, null])
+    expect(shapeOf(row).map(({ product }) => product)).toEqual(before.steps.map((entry) => entry.product))
+    expect(changedOnOf(row)).toEqual([dateAt(3), dateAt(4), dateAt(5), null])
+  })
+
+  it('keeps the date of a recommended product the person has got when the writer picks it as their own shelf entry: it is the same product, not a change', async () => {
+    const before = await started()
+    await gotIt('treat')
+    const gotItVersion = await currentRow()
+    await repository.append({ ...gotItVersion, id: 'version-failing', createdAt: at(2 * DAY + 45 * MINUTE), readyAt: at(2 * DAY + 45 * MINUTE), expectation: WHOLE_FAILURE, steps: gotItVersion.steps.map((entry) => (entry.step === 'treat' ? { ...entry, changedOn: dateAt(4) } : entry)) })
+    addProduct('entry-s', ['Aqua', 'Niacinamide'], { productId: 'prod-SERUM-1', name: 'Name SERUM-1', brand: 'Brand SERUM-1' })
+    world.entries = world.entries.map((entry) => (entry.id === 'entry-s' && entry.kind === 'product' ? { ...entry, productId: 'prod-SERUM-1' } : entry))
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-s', { kind: 'keep' }, 'treat')])
+    setClock(6 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('built')
+
+    const row = await latestRow()
+    expect(row.steps[1]).toMatchObject({ step: 'treat', product: { kind: 'shelf', id: 'entry-s' }, fixedFrom: null })
+    expect(row.steps[1]!.changedOn).toEqual(dateAt(4))
+    expect(before.steps[1]!.product).toEqual({ kind: 'candidate', code: 'SERUM-1' })
+  })
+})
+
+describe('RoutineService.gotIt: changedOn', () => {
+  it('stamps the step whose product has just arrived with the local date of the tap, and leaves every other step\'s date as it was', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    setClock(4 * DAY + HOUR)
+    await build('shelf')
+    const before = await currentRow()
+    setClock(6 * DAY + HOUR)
+
+    await gotIt('treat')
+
+    const row = await currentRow()
+    expect(row).toMatchObject({ reason: 'got-it' })
+    expect(row.steps.map((entry) => entry.gotIt)).toEqual([false, true, false, false])
+    expect(changedOnOf(row)).toEqual([dateAt(4), dateAt(6), null, null])
+    expect(changedOnOf(before)).toEqual([dateAt(4), null, null, null])
+  })
+
+  it('stamps no earlier than day 1 when it is tapped between Start and day 1', async () => {
+    await started()
+    setClock(2 * DAY + HOUR)
+
+    await gotIt('treat')
+
+    expect(changedOnOf(await currentRow())).toEqual([null, DAY_ONE, null, null])
+  })
+
+  it('stamps the local date in the stored time zone', async () => {
+    world.zone = LAGOS
+    await started()
+    setClock(3 * DAY + 11 * HOUR + 30 * MINUTE)
+
+    await gotIt('treat')
+
+    expect((await currentRow()).steps[1]!.changedOn).toEqual(dateAt(4))
+  })
+
+  it('leaves it null before Start: every step is day 1 until the routine begins', async () => {
+    await firstBuild()
+    setClock(HOUR)
+
+    await gotIt('treat')
+
+    const row = await currentRow()
+    expect(row.steps.map((entry) => entry.gotIt)).toEqual([false, true, false, false])
+    expect(changedOnOf(row)).toEqual([null, null, null, null])
+  })
+
+  it('reads no time zone before Start, where the stamp is null whatever the day is', async () => {
+    await firstBuild()
+    setClock(HOUR)
+    const zone = vi.spyOn(deps.reminders, 'zoneFor')
+
+    await gotIt('treat')
+
+    expect(zone).not.toHaveBeenCalled()
+  })
+
+  it('keeps the date when the product the person got becomes their own shelf entry at the next rebuild: it is the same product, not a change', async () => {
+    await started()
+    setClock(4 * DAY + HOUR)
+    await gotIt('treat')
+    addProduct('entry-s', ['Aqua', 'Niacinamide'], { productId: 'prod-SERUM-1', name: 'Name SERUM-1', brand: 'Brand SERUM-1' })
+    world.entries = world.entries.map((entry) => (entry.id === 'entry-s' && entry.kind === 'product' ? { ...entry, productId: 'prod-SERUM-1' } : entry))
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-s', { kind: 'keep' }, 'treat')])
+    setClock(5 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('built')
+
+    const row = await latestRow()
+    expect(row.steps[1]).toMatchObject({ step: 'treat', product: { kind: 'shelf', id: 'entry-s' } })
+    expect(changedOnOf(row)).toEqual([null, dateAt(4), null, null])
   })
 })

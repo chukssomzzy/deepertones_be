@@ -30,7 +30,7 @@ const rowFor = (profileId: string, createdAt: Date, over: Partial<Appended> = {}
   profileId,
   status: 'ready',
   createdAt,
-  steps: [{ step: 'cleanse', product: { kind: 'none' }, frequency: 'am-pm', reason: 'Use what you have for now.', grounding: [], gotIt: false, fixedFrom: null }],
+  steps: [{ step: 'cleanse', product: { kind: 'none' }, frequency: 'am-pm', reason: 'Use what you have for now.', grounding: [], gotIt: false, fixedFrom: null, changedOn: null }],
   tapers: [],
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: [],
