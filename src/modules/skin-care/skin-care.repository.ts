@@ -13,9 +13,9 @@ export class D1SkinCareRepository {
     return row!
   }
 
-  /** The profile's newest `limit` logs, newest first, whole. Served by the (profile, created_at) index. */
+  /** The profile's newest `limit` logs, newest first (logs made in the same millisecond by id, highest first, so the order is stable), whole. Served by the (profile, created_at) index. */
   async recent(profileId: string, limit: number): Promise<SkinLog[]> {
-    return this.db.select().from(skinLogs).where(eq(skinLogs.profileId, profileId)).orderBy(desc(skinLogs.createdAt)).limit(limit)
+    return this.db.select().from(skinLogs).where(eq(skinLogs.profileId, profileId)).orderBy(desc(skinLogs.createdAt), desc(skinLogs.id)).limit(limit)
   }
 
   /** Marks the profile's log overridden. False for another profile's log and for an id nobody holds; true again if it was already marked. */

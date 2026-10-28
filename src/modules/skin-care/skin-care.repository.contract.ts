@@ -123,6 +123,17 @@ export const skinCareRepositoryContract = (name: string, make: () => SkinCareCon
       expect(labelsOf(await repository.recent(profileId, 10))).toEqual(['newest', 'middle', 'oldest'])
     })
 
+    it('answers logs made in the same millisecond in a stable order, the highest id first', async () => {
+      const { repository, newAccount } = await make()
+      const { profileId } = await newAccount()
+      for (const label of ['b', 'c', 'a']) await repository.append(labelled(profileId, label, { createdAt: at(MINUTE) }))
+      await repository.append(labelled(profileId, 'older', { createdAt: at(0) }))
+
+      // The ids are 'a:<profile>', 'b:<profile>' and 'c:<profile>', which sort as a, b, c.
+      expect(labelsOf(await repository.recent(profileId, 10))).toEqual(['c', 'b', 'a', 'older'])
+      expect(labelsOf(await repository.recent(profileId, 2))).toEqual(['c', 'b'])
+    })
+
     it('stops at the limit, keeping the newest, and answers every log when the limit is the count or more', async () => {
       const { repository, newAccount } = await make()
       const { profileId } = await newAccount()

@@ -3,10 +3,11 @@ import { ForbiddenError, UnavailableError, ValidationError } from '../../lib/err
 import { localDay } from '../../lib/local-day'
 import type { CatalogWorkbookService, Escalation, Response } from '../catalog/catalog.workbook.service'
 import type { RemindersService } from '../reminders/reminders.service'
-import { type SkinOutcome, SKIN_OUTCOME_RULES_VERSION, outcomeFor } from './skin-care.outcomes'
+import { type SkinLogReading, type SkinOutcome, SKIN_OUTCOME_RULES_VERSION, outcomeFor } from './skin-care.outcomes'
 import type { SkinCareRepository } from './skin-care.repository'
 import type { SkinLog } from './skin-care.types'
-import type { HowBad, Noticing, Where } from './skin-care.vocabulary'
+import { fillResponse } from './skin-care.text'
+import { HOW_BAD, NOTICING, WHERE, type HowBad, type Noticing, type Where } from './skin-care.vocabulary'
 
 export type SkinCareServiceDeps = {
   repository: SkinCareRepository
@@ -65,8 +66,8 @@ export class SkinCareService {
     const reading = SkinCareService.checked(input)
     const note = input.note ?? null
     const now = this.now()
-    const today = localDay(now, await this.reminders.zoneFor(profileId))
-    const outcome = outcomeFor(reading, { stepDownRunning: await this.routine.stepDownRunning(profileId, today) })
+    const today = await this.dayOf(profileId, now)
+    const outcome = await this.outcomeOf(profileId, today, reading)
 
     const row = await this.repository.append({
       id: crypto.randomUUID(),
@@ -89,14 +90,39 @@ export class SkinCareService {
     return (await this.repository.recent(profileId, SkinCareService.RECENT_LIMIT)).map(SkinCareService.viewOf)
   }
 
+  /** The person's local day; the UTC day if the stored zone cannot be read or used, so a valid log is always stored. */
+  private async dayOf(profileId: string, now: Date): Promise<string> {
+    try {
+      return localDay(now, await this.reminders.zoneFor(profileId))
+    } catch {
+      return localDay(now, null)
+    }
+  }
+
+  /**
+   * A red flag is decided before anything else is read, so it never depends on the routine. For the rest, a step-down read that fails counts as no step-down: a harm signal
+   * then pauses, which is the more cautious result than the expected flare.
+   */
+  private async outcomeOf(profileId: string, today: string, reading: SkinLogReading): Promise<SkinOutcome> {
+    const flagged = outcomeFor(reading, { stepDownRunning: false })
+    if (flagged.kind === 'professional') return flagged
+    let stepDownRunning = false
+    try {
+      stepDownRunning = await this.routine.stepDownRunning(profileId, today)
+    } catch {
+      console.error({ outcome: 'step-down-read-failed', profileId })
+    }
+    return stepDownRunning ? outcomeFor(reading, { stepDownRunning }) : flagged
+  }
+
   private async responseFor(outcome: SkinOutcome, facts: LogFacts): Promise<LogResponse> {
     switch (outcome.kind) {
       case 'advice': {
         const lines = await Promise.all(outcome.codes.map((code) => this.workbook.responseFor(code)))
-        return lines.map((line) => SkinCareService.reviewed(line))
+        return lines.map((line) => fillResponse(SkinCareService.reviewed(line), null))
       }
       case 'expected-flare':
-        return SkinCareService.reviewed(await this.workbook.responseFor('expected-flare'))
+        return fillResponse(SkinCareService.reviewed(await this.workbook.responseFor('expected-flare')), null)
       case 'professional':
         return { ...SkinCareService.reviewed(await this.workbook.escalationFor(outcome.reason)), facts }
       default:
@@ -119,17 +145,21 @@ export class SkinCareService {
     return user
   }
 
-  private static checked(input: LogInput): { noticing: Noticing[]; where: Where[]; howBad: HowBad | null } {
+  private static checked(input: LogInput): SkinLogReading {
+    const refused = (message: string) => new ValidationError('VALIDATION_FAILED', message)
+    if (!Array.isArray(input.noticing) || (input.where != null && !Array.isArray(input.where))) throw refused('Choose from the lists given')
     const noticing = [...new Set(input.noticing)]
     const where = [...new Set(input.where ?? [])]
-    if (noticing.length === 0) throw new ValidationError('VALIDATION_FAILED', 'Choose at least one thing you are noticing')
-    const goodDay = noticing.includes('nothing-unusual')
-    if (goodDay && (noticing.length > 1 || where.length > 0)) {
-      throw new ValidationError('VALIDATION_FAILED', 'Nothing unusual cannot be chosen with anything else, or with a place')
+    if (noticing.length === 0) throw refused('Choose at least one thing you are noticing')
+    if (!noticing.every((item) => (NOTICING as readonly unknown[]).includes(item)) || !where.every((place) => (WHERE as readonly unknown[]).includes(place))) {
+      throw refused('Choose from the lists given')
     }
-    if (!goodDay && !input.howBad) throw new ValidationError('VALIDATION_FAILED', 'Choose how bad it is')
-    if (input.note != null && input.note.length > SkinCareService.MAX_NOTE_LENGTH) {
-      throw new ValidationError('VALIDATION_FAILED', `The note can be at most ${SkinCareService.MAX_NOTE_LENGTH} characters`)
+    if (input.howBad != null && !(HOW_BAD as readonly unknown[]).includes(input.howBad)) throw refused('Choose how bad it is from the list given')
+    const goodDay = noticing.includes('nothing-unusual')
+    if (goodDay && (noticing.length > 1 || where.length > 0)) throw refused('Nothing unusual cannot be chosen with anything else, or with a place')
+    if (!goodDay && !input.howBad) throw refused('Choose how bad it is')
+    if (input.note != null && (typeof input.note !== 'string' || [...input.note].length > SkinCareService.MAX_NOTE_LENGTH)) {
+      throw refused(`The note must be text of at most ${SkinCareService.MAX_NOTE_LENGTH} characters`)
     }
     return { noticing, where, howBad: goodDay ? null : (input.howBad ?? null) }
   }

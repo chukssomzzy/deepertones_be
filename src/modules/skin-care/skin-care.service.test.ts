@@ -79,6 +79,8 @@ type World = {
   now: Date
   zones: Map<string, string | null>
   stepDown: boolean
+  stepDownFails: boolean
+  zoneFails: boolean
   responses: Partial<Record<ResponseOutcome, Response>>
   escalations: Partial<Record<EscalationReason, Escalation>>
   stepDownAsked: [string, string][]
@@ -94,10 +96,16 @@ const makeService = () =>
       responseFor: async (outcome) => world.responses[outcome] ?? null,
       escalationFor: async (reason) => world.escalations[reason] ?? null,
     } satisfies Pick<CatalogWorkbookService, 'responseFor' | 'escalationFor'>,
-    reminders: { zoneFor: async (profileId: string) => world.zones.get(profileId) ?? null },
+    reminders: {
+      zoneFor: async (profileId: string) => {
+        if (world.zoneFails) throw new Error('zone read failed')
+        return world.zones.get(profileId) ?? null
+      },
+    },
     routine: {
       stepDownRunning: async (profileId: string, today: string) => {
         world.stepDownAsked.push([profileId, today])
+        if (world.stepDownFails) throw new Error('step-down read failed')
         return world.stepDown
       },
     },
@@ -110,7 +118,7 @@ const recent = (who: Actor) => runAs(who, () => service.recent())
 const stored = (profileId: string) => repository.recent(profileId, 100)
 
 beforeEach(() => {
-  world = { now: T0, zones: new Map(), stepDown: false, responses: { ...RESPONSES }, escalations: { ...ESCALATIONS }, stepDownAsked: [] }
+  world = { now: T0, zones: new Map(), stepDown: false, stepDownFails: false, zoneFails: false, responses: { ...RESPONSES }, escalations: { ...ESCALATIONS }, stepDownAsked: [] }
   repository = new FakeSkinCareRepository()
   service = makeService()
 })
@@ -383,6 +391,33 @@ describe('SkinCareService.log, validation', () => {
     await refused({ noticing: ['nothing-unusual'], where: ['everywhere', 'nose'], howBad: 'mild' })
   })
 
+  it('refuses a symptom, a place or a level that is not in the lists, and stores nothing', async () => {
+    await refused({ noticing: ['itching', 'rash'], howBad: 'mild' } as unknown as LogInput)
+    await refused({ noticing: ['itching'], where: ['cheeks', 'ankle'], howBad: 'mild' } as unknown as LogInput)
+    await refused({ noticing: ['itching'], howBad: 'severe' } as unknown as LogInput)
+    await refused({ noticing: ['nothing-unusual'], howBad: 'severe' } as unknown as LogInput)
+    await refused({ noticing: 'itching', howBad: 'mild' } as unknown as LogInput)
+    await refused({ noticing: ['itching'], where: 'cheeks', howBad: 'mild' } as unknown as LogInput)
+  })
+
+  it('refuses a note that is not text', async () => {
+    await refused({ noticing: ['itching'], howBad: 'mild', note: 42 } as unknown as LogInput)
+    await refused({ noticing: ['itching'], howBad: 'mild', note: { text: 'hello' } } as unknown as LogInput)
+    await refused({ noticing: ['itching'], howBad: 'mild', note: ['hello'] } as unknown as LogInput)
+  })
+
+  it('counts a note in characters, not UTF-16 units: 300 emoji pass and 501 characters fail', async () => {
+    const accepted = await log(AMARA_ACTOR, { noticing: ['itching'], howBad: 'mild', note: '😀'.repeat(300) })
+    expect(accepted.outcome.kind).toBe('advice')
+    expect((await stored(AMARA))[0]!.note).toBe('😀'.repeat(300))
+    await log(AMARA_ACTOR, { noticing: ['itching'], howBad: 'mild', note: '😀'.repeat(500) })
+
+    const error = await errorOf(log(AMARA_ACTOR, { noticing: ['itching'], howBad: 'mild', note: '😀'.repeat(501) }))
+
+    expect(error).toMatchObject({ name: 'ValidationError', code: 'VALIDATION_FAILED' })
+    expect(await stored(AMARA)).toHaveLength(2)
+  })
+
   it('refuses a symptom with no level, missing or null', async () => {
     await refused({ noticing: ['itching'] })
     await refused({ noticing: ['swelling'], howBad: null })
@@ -411,6 +446,96 @@ describe('SkinCareService.log, validation', () => {
     await log(AMARA_ACTOR, { noticing: ['itching'], howBad: 'mild' })
 
     expect(await stored(AMARA)).toHaveLength(2)
+  })
+})
+
+describe('SkinCareService.log, the {step} in reviewed text', () => {
+  it('fills {step} with "your routine" in the title, body and what to do now of advice and the expected flare', async () => {
+    world.responses = {
+      'advice-itching': { title: 'Itching and {step}', body: 'Go gently with {step}. {step} will settle.', whatToDoNow: 'Keep {step} plain.' },
+      'advice-breakouts': { title: 'Spots', body: 'No placeholder here.', whatToDoNow: null },
+      'expected-flare': { title: 'The flare and {step}', body: 'It passes with {step}.', whatToDoNow: 'Rest {step}.' },
+    }
+
+    const advice = await log(AMARA_ACTOR, { noticing: ['itching', 'new-breakouts'], howBad: 'mild' })
+    world.stepDown = true
+    const flare = await log(AMARA_ACTOR, { noticing: ['new-redness'], howBad: 'mild' })
+
+    expect(advice.response).toEqual([
+      { title: 'Itching and your routine', body: 'Go gently with your routine. your routine will settle.', whatToDoNow: 'Keep your routine plain.' },
+      { title: 'Spots', body: 'No placeholder here.', whatToDoNow: null },
+    ])
+    expect(flare.response).toEqual({ title: 'The flare and your routine', body: 'It passes with your routine.', whatToDoNow: 'Rest your routine.' })
+  })
+
+  it('leaves an escalation row as it is written', async () => {
+    const result = await log(AMARA_ACTOR, { noticing: ['swelling'], howBad: 'mild' })
+
+    expect(result.response).toMatchObject(ESCALATIONS.swelling!)
+  })
+})
+
+describe('SkinCareService.log, when a read fails', () => {
+  it('never reads the step-down for a red flag, so it cannot fail on it', async () => {
+    world.stepDownFails = true
+
+    const flags = [
+      await log(AMARA_ACTOR, { noticing: ['swelling'], howBad: 'mild' }),
+      await log(AMARA_ACTOR, { noticing: ['pus-or-hot-patch', 'new-redness'], howBad: 'hard-to-ignore' }),
+      await log(AMARA_ACTOR, { noticing: ['itching'], where: ['near-eyes'], howBad: 'mild' }),
+    ]
+
+    expect(flags.map((flag) => flag.outcome.kind)).toEqual(['professional', 'professional', 'professional'])
+    expect(world.stepDownAsked).toEqual([])
+    expect(await stored(AMARA)).toHaveLength(3)
+  })
+
+  it('treats a step-down read that fails as no step-down: a harm signal pauses, and the log is stored', async () => {
+    world.stepDownFails = true
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const result = await log(AMARA_ACTOR, { noticing: ['new-redness'], howBad: 'noticeable' })
+
+      expect(result.outcome).toEqual({ kind: 'pause', duringStepDown: false })
+      expect((await stored(AMARA))[0]).toMatchObject({ outcome: 'pause' })
+      expect(spy.mock.calls).toEqual([[{ outcome: 'step-down-read-failed', profileId: AMARA }]])
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('still answers advice and a good day when the step-down read fails', async () => {
+    world.stepDownFails = true
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect((await log(AMARA_ACTOR, { noticing: ['itching'], howBad: 'mild' })).outcome.kind).toBe('advice')
+      expect((await log(AMARA_ACTOR, { noticing: ['nothing-unusual'] })).outcome.kind).toBe('logged')
+      expect(await stored(AMARA)).toHaveLength(2)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('falls back to the UTC day when the zone cannot be read, and stores the log', async () => {
+    world.zoneFails = true
+    world.now = at(11 * HOUR)
+
+    const result = await log(AMARA_ACTOR, { noticing: ['swelling'], howBad: 'mild' })
+
+    expect(result.log.day).toBe('2030-06-15')
+    expect(result.outcome.kind).toBe('professional')
+    expect((await stored(AMARA))[0]).toMatchObject({ localDay: '2030-06-15' })
+  })
+
+  it('falls back to the UTC day when the stored zone is not one Intl knows, and stores the log', async () => {
+    world.zones.set(AMARA, 'Not/AZone')
+    world.now = at(11 * HOUR)
+
+    const result = await log(AMARA_ACTOR, { noticing: ['itching'], howBad: 'mild' })
+
+    expect(result.log.day).toBe('2030-06-15')
+    expect(world.stepDownAsked).toEqual([[AMARA, '2030-06-15']])
+    expect(await stored(AMARA)).toHaveLength(1)
   })
 })
 

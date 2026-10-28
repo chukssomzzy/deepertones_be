@@ -20,7 +20,7 @@ export class FakeSkinCareRepository implements SkinCareRepository {
   async recent(profileId: string, limit: number): Promise<SkinLog[]> {
     return [...this.rows.values()]
       .filter((row) => row.profileId === profileId)
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
       .slice(0, limit)
       .map(copyOf)
   }
