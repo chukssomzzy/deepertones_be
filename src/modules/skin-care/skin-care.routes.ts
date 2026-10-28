@@ -1,6 +1,6 @@
-import { defineRoute, errorResponses, jsonBody, ok, openapiApp, success } from '../../lib/openapi'
+import { defineRoute, documentedOnly, errorResponses, jsonBody, ok, openapiApp, readJsonBody, success } from '../../lib/openapi'
 import { signedIn } from '../../middleware/signed-in'
-import { LogSkinBody, LogSkinResponse, PauseParams, SkinLogsResponse, UndoPauseResponse } from './skin-care.schemas'
+import { CheckInBody, CheckInResponse, LogSkinBody, LogSkinResponse, PauseParams, SkinLogsResponse, UndoPauseResponse } from './skin-care.schemas'
 
 const bearer = [{ bearerAuth: [] }]
 
@@ -42,6 +42,7 @@ const undoPause = defineRoute({
   summary: 'Undo a pause',
   description:
     'Brings the paused step back at once. Only on the local day of the pause (409 `UNDO_EXPIRED` after it). The log that caused the pause is kept and marked overridden. ' +
+    'A pause made again while its step was being brought back goes back on its ladder (`state` is `bringing-back`), never straight to full strength; any other pause is `undone`. ' +
     '404 `PAUSE_NOT_FOUND` for another account\'s pause, an id nobody holds, and a pause that is no longer paused (undone already, or replaced when the step\'s product changed). ' +
     '401 without a session, 403 `SIGNUP_REQUIRED` for a guest.',
   security: bearer,
@@ -50,7 +51,36 @@ const undoPause = defineRoute({
   responses: { 200: success(UndoPauseResponse, 'The pause, undone'), ...errorResponses(401, 403, 404, 409) },
 })
 
+const checkIn = defineRoute({
+  method: 'post',
+  path: '/skin-care/pauses/{id}/check-in',
+  operationId: 'answerCheckIn',
+  tags: ['Skin care'],
+  summary: 'Say how a paused step feels',
+  description:
+    'The answer to the check-in on a pause, from its check day on (409 `CHECK_IN_NOT_DUE` before it). `calmer` on a step brings it back on a gentle ladder: the pause becomes `bringing-back`, the routine shows the step on ' +
+    'its first rung and an inbox row says so; on the check-in with no step it ends. `same` keeps the step paused and asks again three days from today, and the third `same` in a row goes to a professional. ' +
+    '`worse` goes to a professional. A professional result sets the pause to `escalated`: it is never asked again and the routine keeps the step out. `response` is the reviewed text with `{step}` filled, or the ' +
+    'reviewed professional text. A reviewed text or ladder the team has not written is 503 `CONTENT_UNAVAILABLE`, and the pause is as it was. 400 `VALIDATION_FAILED` for any other answer. ' +
+    '404 `PAUSE_NOT_FOUND` for another account\'s pause, an id nobody holds, and a pause that is not `paused`. 401 without a session and 403 `SIGNUP_REQUIRED` for a guest, both before the body is read.',
+  security: bearer,
+  middleware: [signedIn()],
+  request: { params: PauseParams, body: jsonBody(CheckInBody) },
+  responses: { 200: success(CheckInResponse, 'The outcome, the reviewed text and the pause as it is now'), ...errorResponses(400, 401, 403, 404, 409, 503) },
+})
+
+// The check-in is documented with its body but served from a copy without it, so an empty or malformed body is VALIDATION_FAILED (@hono/zod-openapi would answer HTTP_400).
+const checkInServed = { ...checkIn, request: { params: PauseParams }, hide: true }
+
 export const skinCareRoutes = openapiApp()
   .openapi(postSkinLog, async (c) => ok(c, await c.var.services.skinCare.log(c.req.valid('json')), 'Skin log saved'))
   .openapi(getSkinLogs, async (c) => ok(c, { logs: await c.var.services.skinCare.recent() }, 'Skin logs'))
   .openapi(undoPause, async (c) => ok(c, await c.var.services.skinCare.undo(c.req.valid('param').id), 'Pause undone'))
+  .openapi(checkInServed, async (c) => {
+    // The account is checked before the body is read, so a guest with a bad body is 403, not 400.
+    c.var.services.skinCare.requireSignedUp()
+    const { answer } = readJsonBody(await c.req.text(), CheckInBody)
+    return ok(c, await c.var.services.skinCare.answerCheckIn(c.req.valid('param').id, answer), 'Check-in answered')
+  })
+
+skinCareRoutes.openAPIRegistry.registerPath(documentedOnly(checkIn))

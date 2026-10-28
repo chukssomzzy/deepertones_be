@@ -1,6 +1,5 @@
 import type { z } from '@hono/zod-openapi'
-import { ValidationError } from '../../lib/errors'
-import { defineRoute, errorResponses, jsonBody, ok, openapiApp, success, toValidationError } from '../../lib/openapi'
+import { defineRoute, documentedOnly, errorResponses, jsonBody, ok, openapiApp, readJsonBody, success } from '../../lib/openapi'
 import { ProductSummary } from '../scans/scans.schemas'
 import { FALLBACK_IP, rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
@@ -80,20 +79,8 @@ const removeShelfEntry = defineRoute({
 const removeShelfEntryServed = { ...removeShelfEntry, request: { params: EntryParams }, hide: true }
 const addShelfProductServed = { ...addShelfProduct, request: {}, hide: true }
 
-const readBody = <Schema extends z.ZodType>(text: string, schema: Schema): z.infer<Schema> => {
-  let raw: unknown
-  try {
-    raw = JSON.parse(text)
-  } catch {
-    throw new ValidationError('VALIDATION_FAILED', 'Invalid json', [{ path: '', message: 'Malformed JSON in request body' }])
-  }
-  const parsed = schema.safeParse(raw)
-  if (!parsed.success) throw toValidationError('json', parsed.error)
-  return parsed.data
-}
-
 /** No text, or only whitespace, is no reason; anything else must be a valid RemoveShelfEntryBody. */
-const readRemoveBody = (text: string) => (text.trim() === '' ? {} : readBody(text, RemoveShelfEntryBody))
+const readRemoveBody = (text: string) => (text.trim() === '' ? {} : readJsonBody(text, RemoveShelfEntryBody))
 
 // The client address is Cloudflare's own header, as in rateLimit and the scan routes. The service hashes it for the daily per-address quota.
 
@@ -106,7 +93,7 @@ export const shelfRoutes = shelfApp
   .openapi(getShelf, async (c) => ok(c, toShelfResponse(await c.var.services.shelf.list()), 'Shelf'))
   .openapi(getShelfEntry, async (c) => ok(c, toEntryResponse(await c.var.services.shelf.entry(c.req.valid('param').entryId)), 'Shelf entry'))
   .openapi(addShelfProductServed, async (c) => {
-    const { productId } = readBody(await c.req.text(), AddShelfProductBody)
+    const { productId } = readJsonBody(await c.req.text(), AddShelfProductBody)
     const added = await c.var.services.shelf.add(productId, c.req.header('cf-connecting-ip') ?? FALLBACK_IP)
     if (added.status === 'exists') return ok(c, toEntryResponse(added.entry), 'Already on the shelf', 200)
     return ok(c, { scanId: added.scanId, itemId: added.itemId }, 'Scan started', 202)
@@ -117,14 +104,6 @@ export const shelfRoutes = shelfApp
     return c.body(null, 204)
   })
 
-// What these two routes document, registered by hand because they are served by their body-less copies. The middleware is the served
-// route's business and is not OpenAPI (left in, it lands in the spec as an unknown `middleware` key). defineRoute adds 415 to any route
-// with a body, but these read the text, which never refuses a Content-Type: do not document it.
-const asDocumented = <Route extends { responses: object; middleware?: unknown }>(route: Route): Omit<Route, 'middleware'> => {
-  const { middleware: _served, ...documented } = route
-  const { 415: _unsupported, ...responses } = route.responses as Record<number, unknown>
-  return { ...documented, responses }
-}
-
-shelfRoutes.openAPIRegistry.registerPath(asDocumented(addShelfProduct))
-shelfRoutes.openAPIRegistry.registerPath(asDocumented(removeShelfEntry))
+// What these two routes document, registered by hand because they are served by their body-less copies.
+shelfRoutes.openAPIRegistry.registerPath(documentedOnly(addShelfProduct))
+shelfRoutes.openAPIRegistry.registerPath(documentedOnly(removeShelfEntry))

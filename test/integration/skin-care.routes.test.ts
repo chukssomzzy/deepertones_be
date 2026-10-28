@@ -44,6 +44,16 @@ import { countryRow, putCountry, type RawWorkbook } from './catalog.workbook.sup
 //   All three: 401 AUTH_REQUIRED with no session (before the body is looked at), 403 SIGNUP_REQUIRED for a guest.
 //   GET /api/v1/me/routine marks an entry `status: 'paused'` while its step's product is paused, and `active` again after Undo.
 //
+// PR 5 adds (assumed: the brief gives the shape; the wrapper names are the assumptions):
+//   POST /api/v1/me/skin-care/pauses/{id}/check-in   { answer: 'calmer' | 'same' | 'worse' }
+//        200 { outcome: { kind: 'calmer' | 'same' | 'professional', reason? }, response, pause: { id, step: string | null, state, checkDay: string | null } }
+//        response is the reviewed text with {step} filled (calmer, same) or { whoToSee, howSoon, whatToTellThem } (professional); pause.checkDay is null unless the pause is still 'paused'.
+//        400 VALIDATION_FAILED for any other answer; 401 AUTH_REQUIRED (before the body is looked at); 403 SIGNUP_REQUIRED; 404 PAUSE_NOT_FOUND; 409 CHECK_IN_NOT_DUE before the check day.
+//   GET /api/v1/me/routine marks an entry `status: 'bringing-back'` while its step is on the ladder, and `paused` for a step sent to a professional.
+//   POST .../undo of a pause made again while its step was being brought back answers { id, state: 'bringing-back' } (not 'undone'): the response schema must allow it.
+//   A check day that has been reached cannot be made on the real clock the Worker runs on: a pause is made by a harm log (the real path) and its check day is then moved to today
+//   through the pauses repository, the same way the undo test below makes a pause of an earlier day.
+//
 // The worker runs on the real clock, so every day here hangs off one ANCHOR taken at load. A pause that must have been made on an earlier day is put in place through the
 // pauses repository (the only way to be a day late within a test); that one case is marked where it happens.
 
@@ -187,6 +197,8 @@ beforeAll(async () => {
     workbook.responses.rows.push(
       responseRow({ outcome: 'paused', title: 'We paused your {step}', body: PAUSED_BODY, what_to_do_now: 'Skip anything that stings. Keep to a gentle cleanser and moisturiser.' }),
       responseRow({ outcome: 'nothing-to-pause', title: 'Nothing to pause yet', body: NOTHING_BODY, what_to_do_now: 'Keep sunscreen if it does not sting.' }),
+      responseRow({ outcome: 'check-calmer', title: 'Good news about {step}', body: 'We will bring {step} back slowly, one small step at a time.', what_to_do_now: 'Follow the plan the routine shows.' }),
+      responseRow({ outcome: 'check-same', title: 'No change in {step} yet', body: 'We will ask about {step} again in three days.', what_to_do_now: 'Keep it paused for now.' }),
     )
   })
 })
@@ -269,6 +281,12 @@ const postLog = (bearer: string | undefined, json: unknown) =>
   fetchWorker(`${ORIGIN}/api/v1/me/skin-logs`, { method: 'POST', headers: { ...headers(bearer), 'content-type': 'application/json' }, body: JSON.stringify(json) })
 const getLogs = (bearer?: string) => fetchWorker(`${ORIGIN}/api/v1/me/skin-logs`, { headers: headers(bearer) })
 const postUndo = (bearer: string | undefined, id: string) => fetchWorker(`${ORIGIN}/api/v1/me/skin-care/pauses/${id}/undo`, { method: 'POST', headers: headers(bearer) })
+const postCheckIn = (bearer: string | undefined, id: string, json?: unknown) =>
+  fetchWorker(`${ORIGIN}/api/v1/me/skin-care/pauses/${id}/check-in`, {
+    method: 'POST',
+    headers: { ...headers(bearer), 'content-type': 'application/json' },
+    ...(json === undefined ? {} : { body: JSON.stringify(json) }),
+  })
 const getRoutine = (bearer: string) => fetchWorker(`${ORIGIN}/api/v1/me/routine`, { headers: headers(bearer) })
 
 const STING = { noticing: ['stinging-or-burning'], where: ['cheeks'], howBad: 'mild' }
@@ -290,6 +308,7 @@ describe('who may use the skin-log and pause routes', () => {
     ['POST /me/skin-logs', (bearer) => postLog(bearer, STING)],
     ['GET /me/skin-logs', (bearer) => getLogs(bearer)],
     ['POST /me/skin-care/pauses/{id}/undo', (bearer) => postUndo(bearer, crypto.randomUUID())],
+    ['POST /me/skin-care/pauses/{id}/check-in', (bearer) => postCheckIn(bearer, crypto.randomUUID(), { answer: 'same' })],
   ]
 
   it.each(calls)('%s answers 401 AUTH_REQUIRED with no session', async (_name, call) => {
@@ -303,6 +322,20 @@ describe('who may use the skin-log and pause routes', () => {
     const { accessToken } = await newGuest()
 
     const res = await call(accessToken)
+
+    expect(res.status).toBe(403)
+    expect(await errorCodeOf(res)).toBe('SIGNUP_REQUIRED')
+  })
+
+  it('answers 401 to a check-in with no session before it looks at the body, a bodiless one included', async () => {
+    expect((await postCheckIn(undefined, crypto.randomUUID())).status).toBe(401)
+    expect((await postCheckIn(undefined, crypto.randomUUID(), { answer: 'fine' })).status).toBe(401)
+  })
+
+  it.each([[{}], [{ answer: 'fine' }], [undefined]])('answers 403 SIGNUP_REQUIRED to a guest checking in with the body %j: the account is checked before the body is read', async (body) => {
+    const { accessToken } = await newGuest()
+
+    const res = await postCheckIn(accessToken, crypto.randomUUID(), body)
 
     expect(res.status).toBe(403)
     expect(await errorCodeOf(res)).toBe('SIGNUP_REQUIRED')
@@ -645,5 +678,167 @@ describe('POST /api/v1/me/skin-logs: while a step-down is running in the routine
     const result = await dataOf<LogResult>(await postLog(account.accessToken, { noticing: ['new-redness'], howBad: 'noticeable' }))
 
     expect(result.outcome).toEqual({ kind: 'pause', duringStepDown: false })
+  })
+})
+
+// --- the check-in after a pause (PR 5) ---
+
+type CheckInResult = { outcome: { kind: string; reason?: string }; response: any; pause: { id: string; step: string | null; state: string; checkDay: string | null } }
+const pausesStore = new D1StepPausesRepository(db)
+/** The check day has come (see the note at the top: the real clock cannot be moved). */
+const makeDue = (account: Account, pauseId: string) => pausesStore.update(account.profileId, pauseId, { checkDay: utcDay(ANCHOR) })
+const answer = async (account: Account, pauseId: string, kind: 'calmer' | 'same' | 'worse') => dataOf<CheckInResult>(await postCheckIn(account.accessToken, pauseId, { answer: kind }))
+/** An account whose treatment is paused by a harm log and whose check day has come. */
+const dueTreatment = async () => {
+  const account = await withRoutine()
+  const made = await sting(account)
+  await makeDue(account, made.paused!.id)
+  return { account, id: made.paused!.id }
+}
+const professionalText = (reason: string) => ({ whoToSee: `Who to see for ${reason}.`, howSoon: `How soon for ${reason}.`, whatToTellThem: `What to tell them for ${reason}.` })
+
+describe('POST /api/v1/me/skin-care/pauses/{id}/check-in: what it refuses', () => {
+  it.each([[{ answer: 'fine' }], [{ answer: 'CALMER' }], [{}], [{ answer: null }]])('answers 400 VALIDATION_FAILED for %j, and leaves the pause paused', async (body) => {
+    const { account, id } = await dueTreatment()
+
+    const res = await postCheckIn(account.accessToken, id, body)
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+    expect(await pausesStore.find(account.profileId, id)).toMatchObject({ state: 'paused', sameCount: 0, ladderCode: null })
+  })
+
+  it('answers 400 VALIDATION_FAILED for a request with no body', async () => {
+    const { account, id } = await dueTreatment()
+
+    const res = await postCheckIn(account.accessToken, id)
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+  })
+
+  it('answers 409 CHECK_IN_NOT_DUE before the check day, and leaves the pause paused', async () => {
+    const account = await withRoutine()
+    const made = await sting(account)
+
+    const res = await postCheckIn(account.accessToken, made.paused!.id, { answer: 'calmer' })
+
+    expect(res.status).toBe(409)
+    expect(await errorCodeOf(res)).toBe('CHECK_IN_NOT_DUE')
+    expect(await pausesStore.find(account.profileId, made.paused!.id)).toMatchObject({ state: 'paused', ladderCode: null })
+    expect(await statusesOf(account)).toMatchObject({ treat: 'paused' })
+  })
+
+  it('answers 404 PAUSE_NOT_FOUND for another account\'s pause, a pause that does not exist, and a pause that is not paused any more', async () => {
+    const owner = await dueTreatment()
+    const stranger = await newAccount()
+    await answer(owner.account, owner.id, 'calmer')
+
+    const theirs = await postCheckIn(stranger.accessToken, owner.id, { answer: 'calmer' })
+    const nobody = await postCheckIn(stranger.accessToken, crypto.randomUUID(), { answer: 'calmer' })
+    const again = await postCheckIn(owner.account.accessToken, owner.id, { answer: 'calmer' })
+
+    for (const res of [theirs, nobody, again]) {
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('PAUSE_NOT_FOUND')
+    }
+  })
+})
+
+describe('POST /api/v1/me/skin-care/pauses/{id}/check-in: calmer', () => {
+  it('brings the step back on a ladder: the reviewed text with {step} filled, the pause as bringing back, and the routine shows it', async () => {
+    const { account, id } = await dueTreatment()
+
+    const res = await postCheckIn(account.accessToken, id, { answer: 'calmer' })
+
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { success: true; status: 200; message: string; data: CheckInResult }
+    expect(body).toMatchObject({ success: true, status: 200, message: expect.any(String) })
+    expect(body.data).toEqual({
+      outcome: { kind: 'calmer' },
+      response: { title: 'Good news about Treatment', body: 'We will bring Treatment back slowly, one small step at a time.', whatToDoNow: 'Follow the plan the routine shows.' },
+      pause: { id, step: 'treat', state: 'bringing-back', checkDay: null },
+    })
+    expect(await statusesOf(account)).toEqual({ cleanse: 'active', treat: 'bringing-back', moisturise: 'active', protect: 'active' })
+    expect(await pausesStore.find(account.profileId, id)).toMatchObject({ state: 'bringing-back', ladderStartedOn: utcDay(ANCHOR) })
+  })
+
+  it('ends the check-in with no step, and answers "your routine"', async () => {
+    const account = await newAccount()
+    const logged = await sting(account)
+    expect(logged.outcome).toEqual({ kind: 'nothing-to-pause' })
+    const [stepless] = await pausesStore.openFor(account.profileId)
+    await makeDue(account, stepless!.id)
+
+    const result = await answer(account, stepless!.id, 'calmer')
+
+    expect(result).toEqual({
+      outcome: { kind: 'calmer' },
+      response: { title: 'Good news about your routine', body: 'We will bring your routine back slowly, one small step at a time.', whatToDoNow: 'Follow the plan the routine shows.' },
+      pause: { id: stepless!.id, step: null, state: 'ended', checkDay: null },
+    })
+    expect(await pausesStore.openFor(account.profileId)).toEqual([])
+  })
+})
+
+describe('POST /api/v1/me/skin-care/pauses/{id}/check-in: about the same', () => {
+  it('asks again in three days, keeps the step paused, and the third in a row goes to a professional', async () => {
+    const { account, id } = await dueTreatment()
+
+    const first = await answer(account, id, 'same')
+    expect(first).toEqual({
+      outcome: { kind: 'same' },
+      response: { title: 'No change in Treatment yet', body: 'We will ask about Treatment again in three days.', whatToDoNow: 'Keep it paused for now.' },
+      pause: { id, step: 'treat', state: 'paused', checkDay: utcDay(at(3 * DAY)) },
+    })
+    expect(await statusesOf(account)).toMatchObject({ treat: 'paused' })
+    expect((await postCheckIn(account.accessToken, id, { answer: 'same' })).status).toBe(409)
+
+    await makeDue(account, id)
+    expect((await answer(account, id, 'same')).outcome).toEqual({ kind: 'same' })
+    await makeDue(account, id)
+    const third = await answer(account, id, 'same')
+
+    expect(third).toEqual({
+      outcome: { kind: 'professional', reason: 'unchanged-after-checks' },
+      response: professionalText('unchanged-after-checks'),
+      pause: { id, step: 'treat', state: 'escalated', checkDay: null },
+    })
+  })
+})
+
+describe('POST /api/v1/me/skin-care/pauses/{id}/check-in: worse', () => {
+  it('sends the person to a professional with the reviewed text, and the routine keeps the step out', async () => {
+    const { account, id } = await dueTreatment()
+
+    const result = await answer(account, id, 'worse')
+
+    expect(result).toEqual({
+      outcome: { kind: 'professional', reason: 'worse-after-pause' },
+      response: professionalText('worse-after-pause'),
+      pause: { id, step: 'treat', state: 'escalated', checkDay: null },
+    })
+    expect(await statusesOf(account)).toEqual({ cleanse: 'active', treat: 'paused', moisturise: 'active', protect: 'active' })
+    expect((await postCheckIn(account.accessToken, id, { answer: 'calmer' })).status).toBe(404)
+  })
+})
+
+describe('a step being brought back, and a harm log', () => {
+  it('pauses the same pause again, and Undo the same day puts it back on its ladder', async () => {
+    const { account, id } = await dueTreatment()
+    await answer(account, id, 'calmer')
+
+    const again = await sting(account)
+
+    expect(again.outcome).toEqual({ kind: 'pause', duringStepDown: false })
+    expect(again.paused).toMatchObject({ id, step: 'treat', checkDay: utcDay(at(3 * DAY)) })
+    expect(await statusesOf(account)).toMatchObject({ treat: 'paused' })
+    expect(await pausesStore.openFor(account.profileId)).toHaveLength(1)
+
+    const undone = await postUndo(account.accessToken, id)
+
+    expect(undone.status).toBe(200)
+    expect(await dataOf(undone)).toEqual({ id, state: 'bringing-back' })
+    expect(await statusesOf(account)).toMatchObject({ treat: 'bringing-back' })
   })
 })
