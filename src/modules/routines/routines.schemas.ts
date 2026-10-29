@@ -175,3 +175,68 @@ export const CheckInBody = z
   .openapi('CheckInBody')
 
 export const CheckInResponse = z.object({ day: z.string().openapi({ example: '2030-06-15' }), time: z.enum(CHECK_IN_TIMES) }).openapi('CheckIn')
+
+const TodayEntryResponse = RoutineEntryResponse.omit({ changed: true })
+  .extend({ status: z.enum(['active', 'bringing-back']).openapi({ description: '`active`, or `bringing-back` for a step used again at a gentler pace after a pause. A paused or held step is not listed.' }) })
+  .openapi('TodayEntry', { description: 'One card of a half of the day: the routine\'s entry, without `changed`.' })
+
+const TodayHalfResponse = z.object({
+  done: z.boolean().openapi({ description: 'Whether the person ticked this half off today (`POST /api/v1/me/routine/check-ins`).' }),
+  entries: z.array(TodayEntryResponse).openapi({ description: 'What is due in this half today, in routine order. A paused or held step, an as-needed step and a step on its rest day are left out.' }),
+})
+
+const TodayInboxItemResponse = z.object({
+  id: z.string(),
+  kind: z.string(),
+  day: z.string().openapi({ example: '2030-06-15' }),
+  title: z.string(),
+  body: z.string(),
+  link: z.string().openapi({ description: 'An in-app path to open when the item is tapped.', example: '/routine' }),
+  read: z.boolean(),
+  createdAt: z.string().openapi({ format: 'date-time' }),
+})
+
+export const TodayResponse = z
+  .object({
+    started: z.boolean().openapi({ description: 'Whether the routine in force has a day 1 (Start was tapped). False with no routine, with one a safety change hides, and with one not started.' }),
+    day: z.string().openapi({ description: 'The person\'s local day, `YYYY-MM-DD`: their stored time zone\'s, else UTC (also for a stored zone that cannot be used).', example: '2030-06-15' }),
+    startsOn: z.string().nullable().openapi({ description: 'Day 1, `YYYY-MM-DD`, once started. Start makes tomorrow day 1, so on the day of the tap it is ahead of `day`.' }),
+    week: z.number().int().nullable().openapi({ description: 'The week of the plan, counted from day 1 with no cap. Null before day 1 and when not started.' }),
+    card: z.object({ title: z.string(), text: z.string() }).nullable().openapi({ description: 'The reviewed card for the week, written for the current goal and for a step-down when the team has written one. Null before day 1, and when no card is approved for the week.' }),
+    half: z.enum(['morning', 'evening']).openapi({ description: 'The current half of the local day: morning before 15:00, evening from 15:00. Fixed; not the reminder times.' }),
+    current: TodayHalfResponse.openapi({ description: 'The current half.' }),
+    other: TodayHalfResponse.openapi({ description: 'The other half of the day.' }),
+    allDone: z.boolean().openapi({ description: 'Both halves ticked off today.' }),
+    stepDowns: z
+      .array(z.object({ entryId: z.string(), title: z.string(), step: z.number().int(), of: z.number().int(), line: z.string().openapi({ example: 'Step-down: step 1 of 3' }) }))
+      .openapi({ description: 'Each step-down that is running, with where it is.' }),
+    checkInsDue: z
+      .array(
+        z.object({
+          pauseId: z.string().openapi({ description: 'The pause the check-in answers (`POST /api/v1/me/skin-care/pauses/{id}/check-in`).' }),
+          step: z.enum(ROUTINE_STEPS).nullable().openapi({ description: 'Null for the check-in that has no step (nothing could be paused).' }),
+          title: z.string().nullable().openapi({ description: 'The routine\'s title for the step; null with no step.' }),
+          checkDay: z.string().openapi({ example: '2030-06-18' }),
+        }),
+      )
+      .openapi({ description: 'The check-ins after a pause that are due, until answered.' }),
+    hold: z.object({ title: z.literal('See a professional') }).nullable().openapi({ description: 'Set while a hold is open.' }),
+    bringingBack: z
+      .array(z.object({ step: z.enum(ROUTINE_STEPS), title: z.string(), rung: z.number().int(), of: z.number().int(), line: z.string().openapi({ example: 'Bringing back Serum: step 2 of 3' }) }))
+      .openapi({ description: 'Each step being brought back after a pause, on rest days too.' }),
+    paused: z
+      .array(
+        z.object({
+          pauseId: z.string().openapi({ description: 'The pause, as in `checkInsDue`.' }),
+          step: z.enum(ROUTINE_STEPS),
+          title: z.string().openapi({ description: 'The routine\'s title for the step.' }),
+          checkDay: z.string().openapi({ description: 'The day the person is asked how the skin is, `YYYY-MM-DD`.', example: '2030-06-18' }),
+        }),
+      )
+      .openapi({ description: 'Each step that is paused (or being held for a professional) and so left out of the halves, with the day it is checked.' }),
+    remindersOff: z.boolean().openapi({ description: 'True when reminders are not switched on: show the banner.' }),
+    inbox: z.object({ unread: z.number().int(), latest: z.array(TodayInboxItemResponse).openapi({ description: 'The newest five items, newest first, read or not.' }) }),
+  })
+  .openapi('Today')
+
+export type TodayResponse = z.infer<typeof TodayResponse>

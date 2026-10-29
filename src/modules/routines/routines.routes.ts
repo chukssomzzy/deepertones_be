@@ -1,7 +1,7 @@
 import { defineRoute, errorResponses, jsonBody, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
 import { FALLBACK_IP, rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
-import { CheckInBody, CheckInResponse, LookForResponse, RoutineResponse, StepParams } from './routines.schemas'
+import { CheckInBody, CheckInResponse, LookForResponse, RoutineResponse, StepParams, TodayResponse } from './routines.schemas'
 
 const bearer = [{ bearerAuth: [] }]
 
@@ -129,6 +129,24 @@ const checkIn = defineRoute({
   responses: { 200: success(CheckInResponse, 'The check-in, as recorded'), ...errorResponses(401, 403, 409) },
 })
 
+const getToday = defineRoute({
+  method: 'get',
+  path: '/today',
+  operationId: 'getToday',
+  tags: ['Routine'],
+  summary: 'Today: the week of the plan, the current half of the day\'s steps, and what needs an answer',
+  description:
+    GATES +
+    'Reads only: it asks for no build and marks nothing shown. Computed for the person\'s local day (their stored time zone, else UTC). `week` counts from day 1 with no cap, and `card` is the reviewed ' +
+    'card for it, written for the current goal and for a step-down when the team has written one (null when none is approved). `half` is `morning` before 15:00 local and `evening` from then, whatever the ' +
+    'reminder times; `current` is that half and `other` the other, each with the entries due today (a paused or held step, an as-needed step and a step on its rest day are left out) and whether it was ' +
+    'ticked off with `POST /api/v1/me/routine/check-ins`. `stepDowns`, `bringingBack`, `checkInsDue` and `hold` carry the lines the screen shows. Before the routine is started, or on the day Start was ' +
+    'tapped (day 1 is tomorrow), there is no week, card or entry, but a hold, a check-in that is due, `remindersOff` and the inbox are still answered. When skin-care cannot be read the whole read fails ' +
+    'rather than show a paused step as active.',
+  security: bearer,
+  responses: { 200: success(TodayResponse, 'Today'), ...errorResponses(401, 403, 409, 503) },
+})
+
 export const routinesRoutes = openapiApp()
   .openapi(getRoutine, async (c) => ok(c, await c.var.services.routineViewer.current(), 'Routine'))
   .openapi(watchRoutine, async (c) => c.var.services.routineViewer.watch())
@@ -136,4 +154,5 @@ export const routinesRoutes = openapiApp()
   .openapi(gotIt, async (c) => ok(c, await c.var.services.routineViewer.gotIt(c.req.valid('param').step, c.req.header('cf-connecting-ip') ?? FALLBACK_IP), 'Product marked as got'))
   .openapi(findSoldHere, async (c) => ok(c, await c.var.services.routineViewer.findSoldHere(c.req.valid('param').step), 'Looking for another product', 202))
   .openapi(lookFor, async (c) => ok(c, await c.var.services.routineViewer.lookFor(c.req.valid('param').step), 'What to look for'))
+  .openapi(getToday, async (c) => ok(c, await c.var.services.routineViewer.today(), 'Today'))
   .openapi(checkIn, async (c) => ok(c, await c.var.services.routineCheckIns.checkIn(c.req.valid('json').day, c.req.valid('json').time), 'Check-in recorded'))
