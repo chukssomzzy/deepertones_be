@@ -13,8 +13,9 @@ const hasForbiddenWording = (text: string) => FORBIDDEN_WORDING.some(({ pattern 
 /**
  * Every rule a written routine must keep, checked without a model. Returns [] when it passes, else every failure, gate by gate in
  * the order below and within a gate in entry order. A failure is a fixed code and a step, never text from the routine.
+ * `carriedTapers` are step-downs already under way for a product since taken off the shelf (so not in the skeleton's shelf): the taper gate expects each beside the stops.
  */
-export const checkRoutine = (skeleton: RoutineSkeleton, routine: unknown): GateFailure[] => {
+export const checkRoutine = (skeleton: RoutineSkeleton, routine: unknown, carriedTapers: readonly { shelfProductId: string; templateId: string }[] = []): GateFailure[] => {
   const parsed = RoutineSchema.safeParse(routine)
   if (!parsed.success) return [{ gate: 'parse', step: null }]
   const { steps: entries, tapers, expectation }: Routine = parsed.data
@@ -72,9 +73,10 @@ export const checkRoutine = (skeleton: RoutineSkeleton, routine: unknown): GateF
     if (rank === undefined || max === undefined || rank > max) fail('over-reduced', entry.step)
   })
 
-  // 6. taper: exactly one per stopped product, each naming that product's own template. A drop product has no taper, so one for it is an extra.
+  // 6. taper: exactly one per stopped product, each naming that product's own template, and one for each carried step-down. A drop product has no taper, so one for it is an extra.
   const expectedTapers = new Map<string, string>()
   for (const p of skeleton.shelf) if (p.verdict.kind === 'stop') expectedTapers.set(p.id, p.verdict.taperTemplateId)
+  for (const t of carriedTapers) expectedTapers.set(t.shelfProductId, t.templateId)
   const taperIds = new Set(tapers.map((t) => t.shelfProductId))
   const tapersMatch =
     tapers.length === expectedTapers.size && taperIds.size === tapers.length && tapers.every((t) => expectedTapers.get(t.shelfProductId) === t.templateId)

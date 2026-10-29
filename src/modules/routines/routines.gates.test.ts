@@ -302,6 +302,58 @@ describe('checkRoutine', () => {
 
       expect(checkRoutine(skeleton(), routine({ tapers }))).toEqual([{ gate: 'taper', step: null }])
     })
+
+    // #259 B4: a step-down already under way for a product the person has since taken off the shelf is CARRIED. It is not a stopped product of the skeleton (the skeleton's
+    // shelf is the active shelf), so the caller names it to the gate as the third argument and the gate expects it beside the stops. Nothing else about the rule changes.
+    describe('a carried step-down (its product was removed from the shelf)', () => {
+      const CARRIED = { shelfProductId: 'removed-steroid', templateId: 'tpl-steroid' }
+      const withCarried = (...extra: { shelfProductId: string; templateId: string }[]) => routine({ tapers: [...routine().tapers, CARRIED, ...extra] })
+
+      it('passes the routine that holds it, beside the stopped product\'s own taper', () => {
+        expect(checkRoutine(skeleton(), withCarried(), [CARRIED])).toEqual([])
+      })
+
+      it('passes a routine whose only taper is the carried one, when nothing on the shelf is stopped', () => {
+        const noStop = skeleton({ shelf: skeleton().shelf.filter((p) => p.verdict.kind !== 'stop') })
+
+        expect(checkRoutine(noStop, routine({ tapers: [CARRIED] }), [CARRIED])).toEqual([])
+      })
+
+      it('does not treat it as an extra: the same routine without the carried list is still a taper failure', () => {
+        expect(checkRoutine(skeleton(), withCarried())).toEqual([{ gate: 'taper', step: null }])
+        expect(checkRoutine(skeleton(), withCarried(), [])).toEqual([{ gate: 'taper', step: null }])
+      })
+
+      it('fails a routine that drops a carried step-down: it is owed like a stop', () => {
+        expect(checkRoutine(skeleton(), routine(), [CARRIED])).toEqual([{ gate: 'taper', step: null }])
+      })
+
+      it('fails a carried step-down that names a different template than the one carried', () => {
+        const tapers = [...routine().tapers, { shelfProductId: 'removed-steroid', templateId: 'tpl-made-up' }]
+
+        expect(checkRoutine(skeleton(), routine({ tapers }), [CARRIED])).toEqual([{ gate: 'taper', step: null }])
+      })
+
+      it('fails a duplicated carried step-down', () => {
+        expect(checkRoutine(skeleton(), withCarried(CARRIED), [CARRIED])).toEqual([{ gate: 'taper', step: null }])
+      })
+
+      it('still fails an extra taper that is neither a stop nor carried', () => {
+        const ghost = { shelfProductId: 'ghost', templateId: 'tpl-steroid' }
+
+        expect(checkRoutine(skeleton(), withCarried(ghost), [CARRIED])).toEqual([{ gate: 'taper', step: null }])
+      })
+
+      it('still fails a stopped product with no taper of its own, however many are carried', () => {
+        expect(checkRoutine(skeleton(), routine({ tapers: [CARRIED] }), [CARRIED])).toEqual([{ gate: 'taper', step: null }])
+      })
+
+      it('changes no other gate: the same failures are found with or without a carried step-down', () => {
+        const steps = validSteps().map((e) => (e.step === 'protect' ? { ...e, frequency: 'pm' as const } : e))
+
+        expect(checkRoutine(skeleton(), routine({ steps, tapers: [...routine().tapers, CARRIED] }), [CARRIED])).toEqual([{ gate: 'frequency', step: 'protect' }])
+      })
+    })
   })
 
   describe('too-many-new', () => {

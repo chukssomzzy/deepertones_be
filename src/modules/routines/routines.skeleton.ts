@@ -19,13 +19,15 @@ export type SkeletonInput = {
   /** Each step's candidates in the order the recommendation rules gave them (cheapest first). Steps the kept shelf fills are ignored. */
   candidates: Partial<Record<RoutineStep, Candidate[]>>
   hintsShown: boolean
+  /** A step-down goes on for a product since removed from the shelf (#259 B4): the tapering caution stands though no shelf product is stopped. */
+  carriedTaper?: boolean
 }
 
-/** The cautions the app states: from the safety answers, and tapering when the rules stop a shelf product. The order is fixed: the writer's prompt carries it. */
-export const cautionsOf = (safetyChoices: readonly SafetyChoice[], shelf: readonly SkeletonShelfProduct[]): CautionState[] => [
+/** The cautions the app states: from the safety answers, and tapering when the rules stop a shelf product or a step-down for a removed one goes on. The order is fixed: the writer's prompt carries it. */
+export const cautionsOf = (safetyChoices: readonly SafetyChoice[], shelf: readonly SkeletonShelfProduct[], carriedTaper = false): CautionState[] => [
   ...(safetyChoices.includes('pregnant') ? (['pregnant'] as const) : []),
   ...(safetyChoices.includes('breastfeeding') ? (['breastfeeding'] as const) : []),
-  ...(shelf.some((p) => p.verdict.kind === 'stop') ? (['tapering'] as const) : []),
+  ...(carriedTaper || shelf.some((p) => p.verdict.kind === 'stop') ? (['tapering'] as const) : []),
   ...(safetyChoices.includes('reaction') ? (['recent-reaction'] as const) : []),
   ...(safetyChoices.includes('prescription') ? (['prescription'] as const) : []),
 ]
@@ -80,7 +82,7 @@ export const assembleSkeleton = (input: SkeletonInput): RoutineSkeleton => {
       alsoNoticed: input.alsoNoticed.map((s) => ({ ...s })),
       skinType: input.skinType,
       lowConfidence: LOW_CONFIDENCE_CONCERNS,
-      cautions: cautionsOf(input.safetyChoices, shelf),
+      cautions: cautionsOf(input.safetyChoices, shelf, input.carriedTaper),
       budgetBand: input.budgetBand,
     },
     steps,

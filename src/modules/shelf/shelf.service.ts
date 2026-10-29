@@ -30,6 +30,9 @@ export type ShelfActiveEntry =
   | { id: string; kind: 'product'; addedAt: Date; productId: string; formulationId: string }
   | { id: string; kind: 'no-label'; addedAt: Date; itemId: string }
 
+/** A removed shelf entry as the routines module reads it: its id and the reason it was removed with (null when none was given). */
+export type ShelfRemovedEntry = { id: string; reason: ShelfRemovedReason | null }
+
 /** What adding a product came to: it was already on the shelf (this is its entry), or a typed scan was started and the entry follows when its item is ready. */
 export type ShelfAddResult = { status: 'exists'; entry: ShelfEntryView } | { status: 'started'; scanId: string; itemId: string }
 
@@ -103,6 +106,24 @@ export class ShelfService {
       if (row.productId === null || row.formulationId === null) return []
       return [{ id: row.id, kind: 'product', addedAt: row.addedAt, productId: row.productId, formulationId: row.formulationId }]
     })
+  }
+
+  /**
+   * The profile's removed entries as narrow rows, the earliest removal first, so the routines module can tell which step-downs go on after their product left the shelf.
+   * By the given profile with no session (a build is a job), not capped, and not resolved: only the removal matters, not whether the product still resolves. The reason is the
+   * one the entry was first removed with.
+   */
+  async removedEntriesFor(profileId: string): Promise<ShelfRemovedEntry[]> {
+    return (await this.repository.removedFor(profileId)).map((row) => ({ id: row.id, reason: row.removedReason }))
+  }
+
+  /**
+   * The catalog product of each of these removed entries of the given profile, by entry id, so a step-down for a removed product can be matched to the same product put back on
+   * the shelf as a new entry. By the profile given with no session. An id that is not removed, another profile's, or a no-label entry (it has no product) is left out.
+   */
+  async removedProductIdsFor(profileId: string, entryIds: string[]): Promise<Map<string, string>> {
+    const asked = new Set(entryIds)
+    return new Map((await this.repository.removedFor(profileId)).flatMap((row): [string, string][] => (asked.has(row.id) && row.productId !== null ? [[row.id, row.productId]] : [])))
   }
 
   /**

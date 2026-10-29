@@ -220,6 +220,77 @@ describe('ShelfService.activeEntriesFor', () => {
   })
 })
 
+// #259 B4: the routines module reads which entries a profile took off its shelf and why, by profile id with no session (the build runs as a job), as narrow rows: the entry's id
+// and its removal reason (null when none was given), oldest removal first. The reason is the one the entry was first removed with.
+describe('ShelfService.removedEntriesFor', () => {
+  it('gives each removed entry as its id and reason, oldest removal first, and nothing else', async () => {
+    put(AMARA.profileId, 1, { removedAt: at(20 * MINUTE), removedReason: 'finished' })
+    put(AMARA.profileId, 2, { removedAt: at(10 * MINUTE), removedReason: null })
+    put(AMARA.profileId, 3, { removedAt: at(30 * MINUTE), removedReason: 'not-mine' })
+
+    expect(await service.removedEntriesFor(AMARA.profileId)).toEqual([
+      { id: 'entry-2', reason: null },
+      { id: 'entry-1', reason: 'finished' },
+      { id: 'entry-3', reason: 'not-mine' },
+    ])
+  })
+
+  it('leaves out an entry still on the shelf, and every entry of another profile', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2, { removedAt: at(5 * MINUTE), removedReason: 'stopped' })
+    put(TOLU.profileId, 3, { removedAt: at(5 * MINUTE), removedReason: 'stopped' })
+
+    expect(await service.removedEntriesFor(AMARA.profileId)).toEqual([{ id: 'entry-2', reason: 'stopped' }])
+  })
+
+  it('includes a no-label entry and an entry whose product no longer resolves: it is the removal that matters, not the product', async () => {
+    put(AMARA.profileId, 1, { kind: 'no-label', productId: null, formulationId: null, removedAt: at(MINUTE), removedReason: 'finished' })
+    put(AMARA.profileId, 2, { formulationId: null, removedAt: at(2 * MINUTE), removedReason: null })
+
+    expect((await service.removedEntriesFor(AMARA.profileId)).map((row) => row.id)).toEqual(['entry-1', 'entry-2'])
+  })
+
+  it('shows the reason the entry was first removed with, however it is removed again', async () => {
+    put(AMARA.profileId, 1)
+    await remove(AMARA, 'entry-1', 'finished')
+    await remove(AMARA, 'entry-1', 'not-mine')
+
+    expect(await service.removedEntriesFor(AMARA.profileId)).toEqual([{ id: 'entry-1', reason: 'finished' }])
+  })
+
+  it('answers for the profile it is asked about and never for the caller: it needs no session', async () => {
+    put(AMARA.profileId, 1, { removedAt: at(MINUTE), removedReason: null })
+    put(TOLU.profileId, 2, { removedAt: at(MINUTE), removedReason: null })
+
+    expect(await service.removedEntriesFor(AMARA.profileId)).toEqual([{ id: 'entry-1', reason: null }])
+    expect(await runAs(TOLU, () => service.removedEntriesFor(AMARA.profileId))).toEqual([{ id: 'entry-1', reason: null }])
+  })
+
+  it('answers an empty list for a profile with no removed entries', async () => {
+    expect(await service.removedEntriesFor('profile-nobody')).toEqual([])
+  })
+})
+
+// #259 B4: the product of each removed entry asked about, by entry id, with no session, so a step-down for a removed product can be matched to the product put back as a new entry.
+describe('ShelfService.removedProductIdsFor', () => {
+  it('gives the catalog product of each removed entry asked about', async () => {
+    put(AMARA.profileId, 1, { removedAt: at(MINUTE), removedReason: null })
+    put(AMARA.profileId, 2, { removedAt: at(2 * MINUTE), removedReason: 'finished' })
+
+    expect(await service.removedProductIdsFor(AMARA.profileId, ['entry-1', 'entry-2'])).toEqual(new Map([['entry-1', 'product-1'], ['entry-2', 'product-2']]))
+  })
+
+  it('leaves out an entry not asked about, one still on the shelf, another profile\'s, and a no-label entry', async () => {
+    put(AMARA.profileId, 1, { removedAt: at(MINUTE), removedReason: null })
+    put(AMARA.profileId, 2)
+    put(TOLU.profileId, 3, { removedAt: at(MINUTE), removedReason: null })
+    put(AMARA.profileId, 4, { kind: 'no-label', productId: null, formulationId: null, removedAt: at(MINUTE), removedReason: null })
+    put(AMARA.profileId, 5, { removedAt: at(MINUTE), removedReason: null })
+
+    expect(await service.removedProductIdsFor(AMARA.profileId, ['entry-1', 'entry-2', 'entry-3', 'entry-4'])).toEqual(new Map([['entry-1', 'product-1']]))
+  })
+})
+
 // One entry, by id (spec #171 follow-up): the same view `list` builds for it, or SHELF_ENTRY_NOT_FOUND, the answer `remove` gives for an entry that is not the caller's.
 describe('ShelfService.entry', () => {
   it('gives a product entry exactly as list shows it, through the same view path', async () => {

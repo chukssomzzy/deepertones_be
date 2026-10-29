@@ -17,6 +17,8 @@ export type StableCarry = {
   candidates: Partial<Record<RoutineStep, SkeletonCandidate[]>>
   /** A previous candidate's code to the shelf entry of the same product, once the person has it on the shelf. */
   onShelf: Record<string, string>
+  /** Previous step-downs whose shelf product has been removed but which go on (#259 B4), as the previous version had them, start date included. Optional: none when absent. */
+  carriedRemoved?: StoredTaper[]
 }
 
 export type StableMerge = {
@@ -26,7 +28,7 @@ export type StableMerge = {
   checking: RoutineSkeleton
   /** What the writer is asked: `checking` with each fixed recommended step's gap narrowed to its one candidate, and a broken step's gap holding only what the new skeleton offered. Null when no step is broken and the goal is unchanged. */
   writerSkeleton: RoutineSkeleton | null
-  /** One per stopped shelf product of the new skeleton, in shelf order: the start date kept while the template is unchanged. */
+  /** One per stopped shelf product of the new skeleton, in shelf order: the start date kept while the template is unchanged. Then the carried step-downs of removed products, as they were. */
   carriedTapers: StoredTaper[]
   /** The previous expectation, or null when it is to be rewritten: the goal changed, or the routine failed as a whole and is rebuilt whole. */
   expectation: string | null
@@ -79,12 +81,16 @@ export const stableMerge = (previous: StablePrevious, skeleton: RoutineSkeleton,
   const checking = withCarried(skeleton, carry.candidates)
   const goalChanged = previous.goal !== skeleton.goal
 
-  const carriedTapers = skeleton.shelf.flatMap((p): StoredTaper[] => {
-    if (p.verdict.kind !== 'stop') return []
-    const { taperTemplateId } = p.verdict
-    const before = previous.tapers.find((t) => t.shelfProductId === p.id && t.templateId === taperTemplateId)
-    return [{ shelfProductId: p.id, templateId: taperTemplateId, startedOn: before?.startedOn ?? null }]
-  })
+  const carriedRemoved = carry.carriedRemoved ?? []
+  const carriedTapers = [
+    ...skeleton.shelf.flatMap((p): StoredTaper[] => {
+      if (p.verdict.kind !== 'stop') return []
+      const { taperTemplateId } = p.verdict
+      const before = previous.tapers.find((t) => t.shelfProductId === p.id && t.templateId === taperTemplateId)
+      return [{ shelfProductId: p.id, templateId: taperTemplateId, startedOn: before?.startedOn ?? null }]
+    }),
+    ...carriedRemoved.map((t) => ({ ...t })),
+  ]
 
   // The previous steps as they stand against the new skeleton: a product the person now has on the shelf is that shelf entry, and the grounding is cut to the
   // links the product holds now, so a catalog edit never breaks a step.
@@ -102,7 +108,7 @@ export const stableMerge = (previous: StablePrevious, skeleton: RoutineSkeleton,
   })
 
   // Tapers are the recomputed ones, so the taper gate has nothing to say; a goal change replaces the expectation, so its old words are not asked about.
-  const failures = checkRoutine(checking, asRoutine(current, carriedTapers, goalChanged ? '' : previous.expectation))
+  const failures = checkRoutine(checking, asRoutine(current, carriedTapers, goalChanged ? '' : previous.expectation), carriedRemoved)
   const wholeRoutineFailed = failures.some((f) => f.step === null)
   const broken = new Set(failures.flatMap((f) => (f.step === null ? [] : [f.step])))
 

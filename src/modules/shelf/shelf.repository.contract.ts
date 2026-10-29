@@ -234,6 +234,110 @@ export const shelfRepositoryContract = (name: string, make: () => ShelfContractS
       })
     })
 
+    // #259 B4: the routines module needs to know which of a profile's entries were taken off the shelf, and why, so a step-down for a removed product can go on.
+    // `removedFor(profileId)` answers every soft-removed row of the profile, as stored, oldest removal first (ties by id), and is not capped.
+    describe('removedFor', () => {
+      it('is empty for a profile with nothing removed, whatever is on its shelf', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        await put(productRow(profileId))
+
+        expect(await repository.removedFor(profileId)).toEqual([])
+      })
+
+      it('returns a removed entry as it was stored, with its time and reason, product and no-label alike', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const product = productRow(profileId, { removedAt: at(MINUTE), removedReason: 'finished' })
+        const noLabel = noLabelRow(profileId, { removedAt: at(2 * MINUTE), removedReason: null })
+        await put(product)
+        await put(noLabel)
+
+        const [first, second] = await repository.removedFor(profileId)
+
+        expect(first).toMatchObject({ ...product, removedReason: 'finished' })
+        expect(first!.removedAt!.getTime()).toBe(at(MINUTE).getTime())
+        expect(second).toMatchObject({ ...noLabel, productId: null, removedReason: null })
+        expect(second!.removedAt!.getTime()).toBe(at(2 * MINUTE).getTime())
+      })
+
+      it('gives each reason back as it was stored: finished, stopped, not-mine, and none', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const reasons = ['finished', 'stopped', 'not-mine', null] as const
+        const rows = reasons.map((removedReason, n) => productRow(profileId, { removedAt: at((n + 1) * MINUTE), removedReason }))
+        for (const row of rows) await put(row)
+
+        expect((await repository.removedFor(profileId)).map((row) => [row.id, row.removedReason])).toEqual(rows.map((row) => [row.id, row.removedReason]))
+      })
+
+      it('leaves out an entry that is on the shelf', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const removed = productRow(profileId, { removedAt: at(MINUTE), removedReason: 'stopped' })
+        await put(productRow(profileId))
+        await put(removed)
+
+        expect(idsOf(await repository.removedFor(profileId))).toEqual([removed.id])
+      })
+
+      it('returns only the profile\'s own removed entries', async () => {
+        const { repository, newProfile, put } = await make()
+        const amara = await newProfile()
+        const tolu = await newProfile()
+        const hers = productRow(amara, { removedAt: at(MINUTE), removedReason: 'finished' })
+        const theirs = productRow(tolu, { removedAt: at(MINUTE), removedReason: 'finished' })
+        await put(hers)
+        await put(theirs)
+
+        expect(idsOf(await repository.removedFor(amara))).toEqual([hers.id])
+        expect(idsOf(await repository.removedFor(tolu))).toEqual([theirs.id])
+      })
+
+      it('orders entries by the time they were removed, oldest first, whatever order they were put in or last scanned', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const second = productRow(profileId, { lastScannedAt: at(MINUTE), removedAt: at(2 * MINUTE), removedReason: null })
+        const third = productRow(profileId, { lastScannedAt: at(2 * MINUTE), removedAt: at(3 * MINUTE), removedReason: null })
+        const first = productRow(profileId, { lastScannedAt: at(3 * MINUTE), removedAt: at(MINUTE), removedReason: null })
+        for (const row of [second, third, first]) await put(row)
+
+        expect(idsOf(await repository.removedFor(profileId))).toEqual([first.id, second.id, third.id])
+      })
+
+      it('puts entries removed at the same moment in id order', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const prefix = `entry-${crypto.randomUUID()}`
+        const rows = ['c', 'a', 'b'].map((suffix) => productRow(profileId, { id: `${prefix}-${suffix}`, removedAt: at(MINUTE), removedReason: null }))
+        for (const row of rows) await put(row)
+
+        expect(idsOf(await repository.removedFor(profileId))).toEqual([`${prefix}-a`, `${prefix}-b`, `${prefix}-c`])
+      })
+
+      it('is not capped: more removed entries than one statement can bind are all found', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const rows = Array.from({ length: 205 }, () => productRow(profileId, { removedAt: at(MINUTE), removedReason: null }))
+        for (const row of rows) await put(row)
+
+        expect(idsOf(await repository.removedFor(profileId)).sort()).toEqual(idsOf(rows).sort())
+      })
+
+      it('finds an entry just removed through `remove`, with the reason it was given', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const row = productRow(profileId)
+        await put(row)
+        await repository.remove(profileId, row.id, 'finished', at(5 * MINUTE))
+
+        const [found] = await repository.removedFor(profileId)
+
+        expect(found).toMatchObject({ id: row.id, removedReason: 'finished' })
+        expect(found!.removedAt!.getTime()).toBe(at(5 * MINUTE).getTime())
+      })
+    })
+
     describe('remove', () => {
       it('removes the profile\'s own entry with its reason and the time, and says it did', async () => {
         const { repository, newProfile, put, stored } = await make()
