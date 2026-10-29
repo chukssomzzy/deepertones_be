@@ -39,7 +39,7 @@ import { parseFrame, sseReader, type SseReader } from './sse'
 // The errors before the stream starts (401, 503 VERDICT_UNAVAILABLE, 409 GOAL_REQUIRED) are the usual JSON envelopes, in GET's order.
 //
 // A GUEST never receives the full verdict (owner decision, spec #171), on the stream any more than on GET: a guest follows a stream of the locked preview only, whose
-// `snapshot` and every `verdict` frame carry the guest's body `{ status: 'ready', locked: true, fit, total, counts, escalates }` (or `{ status: 'pending' }`), never a
+// `snapshot` and every `verdict` frame carry the guest's body `{ status: 'ready', locked: true, fit, groups, total, counts, escalates }` (or `{ status: 'pending' }`), never a
 // product, entry id, name, reason or step-down. A verified user's stream carries the full verdict, with `locked: false`. One build publishes to both (`verdict:<profileId>`
 // and `verdict-preview:<profileId>`, which the service tests pin; here it is told by what each client reads), and `done` goes to both. The tests that follow the full
 // verdict are therefore a verified user's (`readyMember`); the guest's are in the last describe.
@@ -292,14 +292,18 @@ const buildWithFitFailingForTheDay = async (guest: Guest) => {
 const STEROID_TAPER = code('TPR-STEROID')
 const LIGHTENING_TAPER = code('TPR-LIGHTENING')
 const STEROID_INGREDIENT = `${word('zq')} corticoidum`
+// #259 A2: every ready body also carries `groups` (the fixed headings with counts) and each full product `suggest`; their words are pinned in verdicts.view.test.ts.
+const GROUPS = { groups: expect.any(Array) }
+const SUGGEST = { suggest: expect.any(Array) }
 const helpingBody = (entryId: string, shown: object, fit: 'ready' | 'not-ready' = 'ready') => ({
   status: 'ready',
   locked: false,
   fit,
+  ...GROUPS,
   products: [
     fit === 'ready'
-      ? { entryId, ...shown, group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false }
-      : { entryId, ...shown, group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false },
+      ? { entryId, ...shown, group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST }
+      : { entryId, ...shown, group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, ...SUGGEST },
   ],
   tapers: [],
 })
@@ -402,7 +406,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     const [verdict] = (await stream.read(2)).frames.map(parseFrame)
     expect(verdict!.event).toBe('verdict')
     const view = verdict!.data as ReadyView
-    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
     expect(view.products.find((product) => product.entryId === steroid)).toEqual({
       entryId: steroid,
       ...shows(steroid),
@@ -410,6 +414,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
       verdict: { kind: 'stop', taperCode: STEROID_TAPER },
       reason: expect.any(String),
       escalate: false,
+      ...SUGGEST,
     })
     for (const product of view.products) for (const internal of ['facts', 'step', 'sourceUrls', 'taperTemplateId']) expect(product).not.toHaveProperty(internal)
     expect(view.tapers.map((taper) => taper.code)).toEqual([STEROID_TAPER])
@@ -575,7 +580,7 @@ describe('GET /api/v1/me/verdict/events: a guest follows the locked preview, nev
     expect(frames.map(parseFrame)).toEqual([
       {
         event: 'verdict',
-        data: { status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, escalates: 0 },
+        data: { status: 'ready', locked: true, fit: 'ready', ...GROUPS, total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, escalates: 0 },
         comment: null,
       },
       { event: 'done', data: {}, comment: null },
@@ -604,7 +609,7 @@ describe('GET /api/v1/me/verdict/events: a guest follows the locked preview, nev
     expect(frames.map(parseFrame)).toEqual([
       {
         event: 'snapshot',
-        data: { status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, escalates: 0 },
+        data: { status: 'ready', locked: true, fit: 'ready', ...GROUPS, total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, escalates: 0 },
         comment: null,
       },
       { event: 'done', data: {}, comment: null },
@@ -625,7 +630,7 @@ describe('GET /api/v1/me/verdict/events: a guest follows the locked preview, nev
 
     const first = await stream.read(2, QUIET_MS)
     expect(first.frames.map(parseFrame)).toEqual([
-      { event: 'verdict', data: { status: 'ready', locked: true, fit: 'not-ready', total: 1, counts: { ...NO_GROUPS, undecided: 1 }, escalates: 0 }, comment: null },
+      { event: 'verdict', data: { status: 'ready', locked: true, fit: 'not-ready', ...GROUPS, total: 1, counts: { ...NO_GROUPS, undecided: 1 }, escalates: 0 }, comment: null },
     ])
     expect(first.ended).toBe(false)
 
@@ -633,7 +638,7 @@ describe('GET /api/v1/me/verdict/events: a guest follows the locked preview, nev
 
     const { frames, ended } = await stream.read(3)
     expect(frames.map(parseFrame)).toEqual([
-      { event: 'verdict', data: { status: 'ready', locked: true, fit: 'ready', total: 1, counts: { ...NO_GROUPS, helping: 1 }, escalates: 0 }, comment: null },
+      { event: 'verdict', data: { status: 'ready', locked: true, fit: 'ready', ...GROUPS, total: 1, counts: { ...NO_GROUPS, helping: 1 }, escalates: 0 }, comment: null },
       { event: 'done', data: {}, comment: null },
     ])
     expect(ended).toBe(true)
@@ -658,7 +663,7 @@ describe('GET /api/v1/me/verdict/events: a guest follows the locked preview, nev
     ])
     const guests = await asGuest.stream.read(3)
     expect(guests.frames.map(parseFrame)).toEqual([
-      { event: 'verdict', data: { status: 'ready', locked: true, fit: 'ready', total: 1, counts: { ...NO_GROUPS, helping: 1 }, escalates: 0 }, comment: null },
+      { event: 'verdict', data: { status: 'ready', locked: true, fit: 'ready', ...GROUPS, total: 1, counts: { ...NO_GROUPS, helping: 1 }, escalates: 0 }, comment: null },
       { event: 'done', data: {}, comment: null },
     ])
     expect(guests.frames.join('\n\n')).not.toContain(entryId)
