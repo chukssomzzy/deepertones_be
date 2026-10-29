@@ -50,16 +50,16 @@ describe('API docs, where DOCS_ENABLED is "true"', () => {
     expect(Object.keys(pending!.properties!)).toEqual(['status'])
 
     const preview = variants.find((variant) => JSON.stringify(lockedOf(variant)) === '[true]')!
-    expect(Object.keys(preview.properties!).sort()).toEqual(['counts', 'escalates', 'fit', 'locked', 'status', 'total'])
-    expect([...preview.required!].sort()).toEqual(['counts', 'escalates', 'fit', 'locked', 'status', 'total'])
+    expect(Object.keys(preview.properties!).sort()).toEqual(['counts', 'escalates', 'fit', 'groups', 'locked', 'status', 'total'])
+    expect([...preview.required!].sort()).toEqual(['counts', 'escalates', 'fit', 'groups', 'locked', 'status', 'total'])
     const groups = ['blocking', 'cant-tell', 'conflicting', 'helping', 'likely-the-problem', 'prescribed', 'redundant', 'undecided']
     expect(Object.keys(preview.properties!.counts!.properties!).sort()).toEqual(groups)
     expect([...preview.properties!.counts!.required!].sort()).toEqual(groups)
     for (const never of ['products', 'tapers']) expect(preview.properties).not.toHaveProperty(never)
 
     const full = variants.find((variant) => JSON.stringify(lockedOf(variant)) === '[false]')!
-    expect(Object.keys(full.properties!).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
-    expect([...full.required!].sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(full.properties!).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
+    expect([...full.required!].sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
   })
 
   it('list the origin they are served from first, so "Try it out" never targets production by accident', async () => {

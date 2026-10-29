@@ -1107,6 +1107,13 @@
                 ],
                 "description": "`not-ready` when the goal-fit check has not answered yet: the products it would decide are shown as kept for now, and it is tried again."
               },
+              "groups": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ShelfVerdictGroup"
+                },
+                "description": "All eight headings in the order the screen shows them, each with fixed words and its product count (0 where empty; the app hides the zeros). Copy awaiting the owner's sign-off."
+              },
               "total": {
                 "type": "integer",
                 "description": "How many skin-care products the verdict holds."
@@ -1160,6 +1167,7 @@
               "status",
               "locked",
               "fit",
+              "groups",
               "total",
               "counts",
               "escalates"
@@ -1189,6 +1197,13 @@
                 ],
                 "description": "`not-ready` when the goal-fit check has not answered yet: the products it would decide are shown as kept for now, and it is tried again."
               },
+              "groups": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ShelfVerdictGroup"
+                },
+                "description": "All eight headings in the order the screen shows them, each with fixed words and its product count (0 where empty; the app hides the zeros). Copy awaiting the owner's sign-off."
+              },
               "products": {
                 "type": "array",
                 "items": {
@@ -1208,10 +1223,52 @@
               "status",
               "locked",
               "fit",
+              "groups",
               "products",
               "tapers"
             ]
           }
+        ]
+      },
+      "ShelfVerdictGroup": {
+        "type": "object",
+        "properties": {
+          "group": {
+            "type": "string",
+            "enum": [
+              "prescribed",
+              "likely-the-problem",
+              "conflicting",
+              "cant-tell",
+              "helping",
+              "redundant",
+              "blocking",
+              "undecided"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "description": "The heading, e.g. \"Helping\". `undecided` is shown as \"Still checking\"."
+          },
+          "subtitle": {
+            "type": "string"
+          },
+          "intro": {
+            "type": "string",
+            "description": "One or two plain sentences about the products under the heading."
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "How many products are under it; 0 where there are none."
+          }
+        },
+        "required": [
+          "group",
+          "title",
+          "subtitle",
+          "intro",
+          "count"
         ]
       },
       "ShelfVerdictProduct": {
@@ -1374,6 +1431,14 @@
               "photograph-back-label"
             ],
             "description": "Only on a `cant-tell` product: what to do to get it read."
+          },
+          "suggest": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "One or more (usually one to three) fixed lines on what to do with the product, worked out from `verdict` alone (and `escalate`, and the `cant-tell` group). Copy awaiting the owner's sign-off."
           }
         },
         "required": [
@@ -1381,7 +1446,8 @@
           "group",
           "verdict",
           "reason",
-          "escalate"
+          "escalate",
+          "suggest"
         ]
       },
       "ShelfVerdictAction": {
