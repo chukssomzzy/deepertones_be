@@ -12,6 +12,8 @@ import { CatalogWorkbookService } from './modules/catalog/catalog.workbook.servi
 import { FaceDataCleaner } from './modules/face-scans/face-scans.cleaner'
 import { D1FaceScansRepository } from './modules/face-scans/face-scans.repository'
 import { FaceScanService } from './modules/face-scans/face-scans.service'
+import { D1FaceSharesRepository } from './modules/face-shares/face-shares.repository'
+import { FaceSharesService } from './modules/face-shares/face-shares.service'
 import { D1GoalsRepository } from './modules/goals/goals.repository'
 import { GoalsService } from './modules/goals/goals.service'
 import { D1HealthRepository } from './modules/health/health.repository'
@@ -364,6 +366,8 @@ export const buildContainer = (env: CloudflareBindings) => {
     await routines().request(profileId, reason, requestKey)
   }
 
+  const faceShares = once(() => new FaceSharesService({ repository: new D1FaceSharesRepository(db()) }))
+
   const faceScans = once(
     () =>
       new FaceScanService({
@@ -545,6 +549,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get faceScans() {
       return faceScans()
+    },
+    get faceShares() {
+      return faceShares()
     },
     get goals() {
       return goals()
