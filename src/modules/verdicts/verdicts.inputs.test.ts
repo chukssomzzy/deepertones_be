@@ -6,7 +6,7 @@ import type { SafetyMentionRow } from '../safety/safety.types'
 import type { NoLabelPurpose } from '../scans/scans.vocabulary'
 import type { ShelfActiveEntry } from '../shelf/shelf.service'
 import type { ShownConcern } from '../face-scans/face-scans.tables'
-import { verdictFingerprint } from './verdicts.fingerprint'
+import { VERDICT_FORMAT_VERSION, verdictFingerprint } from './verdicts.fingerprint'
 import { floorVerdicts, type FloorResult } from './verdicts.floor'
 import { assembleVerdictInputs, fingerprintInputOf, fitRequestOf, provenanceOf } from './verdicts.inputs'
 import { mergeVerdict } from './verdicts.merge'
@@ -62,6 +62,7 @@ const REFERENCE: VerdictReference = {
   catalogVersion: 12,
   rules: RULES,
   claimPhrases: ['whitening', 'toning'],
+  // #259 A3: the approved claim words with the reviewer's role and the source link each is explained with; the phrases above are the same words.
   claimWords: [
     { phrase: 'whitening', sourceUrl: 'https://example.org/claims/whitening', reviewerRole: 'a pharmacist' },
     { phrase: 'toning', sourceUrl: null, reviewerRole: null },
@@ -280,7 +281,7 @@ describe('assembleVerdictInputs: the floor input', () => {
       ],
       clashes: [{ ids: ['e-spf', 'e-acid'] as [string, string], reduceId: 'e-spf' }],
     }
-    const merged = mergeVerdict({ floor, fit, entries })
+    const merged = mergeVerdict({ floor, fit, entries, reference: REFERENCE })
 
     expect(merged.products.map((p) => [p.entryId, p.group, p.verdict])).toEqual([
       ['e-spf', 'helping', { kind: 'keep' }],
@@ -303,7 +304,7 @@ describe('assembleVerdictInputs: the floor input', () => {
       clashes: [{ ids: ['e-spf', 'e-acid'] as [string, string], reduceId: 'e-spf' }],
     }
 
-    const merged = mergeVerdict({ floor: floorVerdicts(floorInput), fit, entries })
+    const merged = mergeVerdict({ floor: floorVerdicts(floorInput), fit, entries, reference: REFERENCE })
 
     expect(merged.products.map((p) => [p.entryId, p.verdict.kind])).toEqual([['e-spf', 'reduce'], ['e-acid', 'keep']])
   })
@@ -546,6 +547,14 @@ describe('fitRequestOf', () => {
 })
 
 describe('fingerprintInputOf', () => {
+  it('names the verdict format version, so a change to the shape of a saved verdict (the basis, say) makes every saved verdict stale once and rebuilds it on its next read', () => {
+    const facts = factsOf(BASIC)
+
+    expect(VERDICT_FORMAT_VERSION).toBeGreaterThanOrEqual(1)
+    expect(Number.isInteger(VERDICT_FORMAT_VERSION)).toBe(true)
+    expect(fingerprintInputOf(facts, floorOf(facts))).toMatchObject({ formatVersion: VERDICT_FORMAT_VERSION })
+  })
+
   it('names the rules, claim phrases, rules version, goal, model and prompt the verdict is built against', () => {
     const facts = factsOf(BASIC)
 

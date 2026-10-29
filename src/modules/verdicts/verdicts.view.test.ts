@@ -53,6 +53,7 @@ const product = (group: VerdictGroup, verdict: ShelfVerdict, over: Partial<Saved
   escalate: false,
   reason: 'A reason the rules wrote.',
   facts: [],
+  basis: [],
   step: null,
   sourceUrls: [],
   ...over,

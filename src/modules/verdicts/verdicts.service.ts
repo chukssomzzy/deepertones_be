@@ -186,13 +186,13 @@ export class VerdictService {
     let failure: unknown
     let failed = false
     try {
-      if (request !== null) merged = mergeVerdict({ floor, fit: await this.fitter.fit(request), entries: inputs.entries, choices })
+      if (request !== null) merged = mergeVerdict({ floor, fit: await this.fitter.fit(request), entries: inputs.entries, choices, reference })
     } catch (error) {
       failed = true
       failure = error
       console.error({ outcome: 'fit-failed', profileId, error: describeError(error) })
     }
-    merged ??= mergeVerdict({ floor, fit: null, entries: inputs.entries, choices })
+    merged ??= mergeVerdict({ floor, fit: null, entries: inputs.entries, choices, reference })
 
     const now = this.now()
     const products = merged.products.map((product) => ({ ...product, ...(inputs.perEntry.get(product.entryId) ?? { step: null, sourceUrls: [] }) }))

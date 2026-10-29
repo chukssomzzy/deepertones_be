@@ -59,6 +59,7 @@ const BASE: Input = {
   scan: { skinType: 'combination', concerns: [{ concern: 'hd_age_spot', band: 'some' }, { concern: 'hd_redness', band: 'a-little' }] },
   model: 'claude-sonnet-5-5',
   promptHash: 'prompt-hash-1',
+  formatVersion: 1,
 }
 
 const hashOf = (input: Input) => verdictFingerprint(input)
@@ -142,6 +143,25 @@ describe('verdictFingerprint: what stays the same', () => {
     expect(await hashOf(withSafety({ mentions: [...BASE.safety.mentions, carried] }))).toBe(await hashOf(withSafety({ mentions: [...BASE.safety.mentions, marked] })))
   })
 
+  // Owner decision (#171): an edit to the catalog alone does not rebuild verdicts. A saved verdict keeps the reviewer's role it was built with (its basis is a
+  // snapshot), so the role is no input. A guard rather than a discovery: the fingerprint picks the rule's fields by name, so it holds unless someone adds the role there.
+  it('is not changed by the reviewer role of a rule, which a saved verdict snapshots: set, changed or null hashes the same', async () => {
+    const withRole = (reviewerRole: string | null): Input => withRules(BASE.rules.map((rule) => ({ ...rule, reviewerRole }) as Rules[number]))
+
+    const hash = await hashOf(withRole('a consultant dermatologist'))
+
+    expect(await hashOf(withRole('a pharmacist'))).toBe(hash)
+    expect(await hashOf(withRole(null))).toBe(hash)
+    expect(hash).toBe(await hashOf(BASE))
+  })
+
+  it('is not changed by the reviewer role or the source link of a claim word, only by its phrase', async () => {
+    const words = (reviewerRole: string | null, sourceUrl: string | null) => ({ ...BASE, claimWords: [{ phrase: 'whitening', reviewerRole, sourceUrl }, { phrase: 'bleaching', reviewerRole, sourceUrl }] }) as Input
+
+    expect(await hashOf(words('a pharmacist', 'https://example.org/a'))).toBe(await hashOf(words(null, null)))
+    expect(await hashOf(words(null, null))).toBe(await hashOf(BASE))
+  })
+
   it('is not changed by the global catalog version, which is not an input: a Products-only upload leaves a verdict current', async () => {
     const withCatalogVersion = { ...BASE, catalogVersion: 99 } as Input
 
@@ -206,6 +226,9 @@ describe('verdictFingerprint: what changes it', () => {
     // the model
     ['another model', () => ({ ...BASE, model: 'claude-sonnet-5-6' })],
     ['another prompt', () => ({ ...BASE, promptHash: 'prompt-hash-2' })],
+    // the shape of a saved verdict (#259 A3): a verdict saved in the old shape is stale once, and rebuilt on its next read
+    ['another verdict format version', () => ({ ...BASE, formatVersion: BASE.formatVersion + 1 })],
+    ['an earlier verdict format version', () => ({ ...BASE, formatVersion: BASE.formatVersion - 1 })],
   ]
 
   it.each(CHANGES)('changes with %s', async (_name, make) => {

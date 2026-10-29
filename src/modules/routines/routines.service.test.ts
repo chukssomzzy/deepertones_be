@@ -158,6 +158,7 @@ const verdictProduct = (entryId: string, verdict: ShelfVerdict, step: RoutineSte
   escalate: false,
   reason: 'A test reason.',
   facts: [],
+  basis: [],
   step,
   sourceUrls: [],
   ...over,

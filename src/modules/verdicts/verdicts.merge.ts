@@ -2,6 +2,7 @@ import type { Category } from '../catalog/catalog.vocabulary'
 import type { FitResult } from '../../providers/verdict-fitting/verdict-fitter.provider'
 import type { ShelfVerdict } from '../routines/routines.types'
 import type { SafetyChoice } from '../safety/safety.vocabulary'
+import { fitBasis, floorBasisOf, type Basis, type BasisReference } from './verdicts.basis'
 import { clashReason, floorReason } from './verdicts.copy'
 import type { FloorFact, FloorGroup, FloorResult } from './verdicts.floor'
 
@@ -20,6 +21,8 @@ export type VerdictProduct = {
   reason: string
   /** The floor's facts for a product it decided, and none for any other. */
   facts: FloorFact[]
+  /** Where the verdict comes from, saved with the product as it was when the verdict was built (spec #259): never looked up again. None for an undecided product. */
+  basis: Basis[]
   /** A redundant product: the product that stays and does its job. */
   sameJobAs?: string
   /** A can't-tell product: what to do to get it read. */
@@ -40,6 +43,8 @@ export type MergeInput = {
   entries: readonly { id: string; category: Category }[]
   /** The profile's safety choices, which the stop copy reads. */
   choices?: readonly SafetyChoice[]
+  /** The approved rules the floor was given, and the approved claim words: what a floor-decided product's basis is taken from. */
+  reference: BasisReference
 }
 
 // Shown for an open product while the judge has not answered.
@@ -49,21 +54,23 @@ const pairKey = (a: string, b: string): string => JSON.stringify([a, b].sort())
 
 const survives = (product: VerdictProduct): boolean => product.verdict.kind === 'keep' || product.verdict.kind === 'reduce'
 
-const floorProduct = (entry: Extract<FloorResult['entries'][number], { status: 'fixed' }>, choices: readonly SafetyChoice[]): VerdictProduct => ({
+const floorProduct = (entry: Extract<FloorResult['entries'][number], { status: 'fixed' }>, choices: readonly SafetyChoice[], reference: BasisReference): VerdictProduct => ({
   entryId: entry.id,
   group: entry.group,
   verdict: entry.verdict,
   escalate: entry.escalate,
   reason: floorReason(entry, choices),
   facts: entry.facts,
+  basis: floorBasisOf(entry.facts, reference),
   ...(entry.group === 'cant-tell' ? { nudge: 'photograph-back-label' as const } : {}),
 })
 
 const openProduct = (id: string, fit: FitResult | null): VerdictProduct => {
-  if (fit === null) return { entryId: id, group: 'undecided', verdict: { kind: 'keep' }, escalate: false, reason: UNDECIDED_REASON, facts: [] }
+  if (fit === null) return { entryId: id, group: 'undecided', verdict: { kind: 'keep' }, escalate: false, reason: UNDECIDED_REASON, facts: [], basis: [] }
   const said = fit.products.find((product) => product.id === id)
   if (!said) throw new Error(`The fit judge gave no answer for the open product ${id}`)
-  const base = { entryId: id, escalate: false, reason: said.reason, facts: [] }
+  // A product a clash reduces afterwards keeps its basis: the fit's, or none while the judge has not answered (the reduction is then the floor's tie-break, not the fit's).
+  const base = { entryId: id, escalate: false, reason: said.reason, facts: [], basis: [fitBasis()] }
   switch (said.label) {
     case 'redundant':
       return { ...base, group: 'redundant', verdict: { kind: 'drop' }, sameJobAs: said.sameJobAs }
@@ -105,7 +112,7 @@ const applyClashes = (products: Map<string, VerdictProduct>, { floor, fit }: Pic
  * Throws, so that no verdict is saved, when a product needs a step-down that has no approved template (a product that needs one is never shown as a plain drop),
  * when the floor has no answer for a shelf product, or when the judge's answer does not fit the shelf.
  */
-export const mergeVerdict = ({ floor, fit, entries, choices = [] }: MergeInput): MergedVerdict => {
+export const mergeVerdict = ({ floor, fit, entries, choices = [], reference }: MergeInput): MergedVerdict => {
   for (const entry of floor.entries) {
     if (entry.status === 'taper-missing') throw new Error(`No approved ${entry.missingTaper} step-down template, which ${entry.id} needs`)
   }
@@ -118,7 +125,7 @@ export const mergeVerdict = ({ floor, fit, entries, choices = [] }: MergeInput):
     const entry = decided.get(id)
     if (!entry) throw new Error(`The floor has no answer for the shelf product ${id}`)
     // A fit answer for a product the floor fixed is never read: the floor's label cannot be changed by it.
-    products.set(id, entry.status === 'fixed' ? floorProduct(entry, choices) : openProduct(id, fit))
+    products.set(id, entry.status === 'fixed' ? floorProduct(entry, choices, reference) : openProduct(id, fit))
   }
   applyClashes(products, { floor, fit })
 

@@ -70,6 +70,7 @@ const mergedOf = (id: string, said: Lbl | null): VerdictProduct => ({
   escalate: false,
   reason: 'A made-up reason.',
   facts: [],
+  basis: [],
 })
 
 type Built = { input: VerdictCaseInput; labels: CaseLabels | null }
@@ -305,7 +306,7 @@ type Fixed = Extract<FloorEntry, { status: 'fixed' }>
 const steroidStop: Fixed = { id: 'g', status: 'fixed', group: 'likely-the-problem', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, escalate: false, facts: [] }
 const steroidExpected = { outcome: 'fixed' as const, group: 'likely-the-problem' as const, verdict: 'stop' as const, taper: 'steroid' as const }
 
-const mergedFixed = (entry: Fixed): VerdictProduct => ({ entryId: entry.id, group: entry.group, verdict: entry.verdict, escalate: entry.escalate, reason: 'A made-up reason.', facts: [] })
+const mergedFixed = (entry: Fixed): VerdictProduct => ({ entryId: entry.id, group: entry.group, verdict: entry.verdict, escalate: entry.escalate, reason: 'A made-up reason.', facts: [], basis: [] })
 
 /** A case the floor settles whole: one fixed entry and what the case expects of it. Everything is as the rules say unless the test changes one thing. */
 const floorCase = (over: { floor?: FloorEntry; expected?: VerdictCaseInput['expect']['entries'][string]; products?: VerdictProduct[] | null; state?: VerdictCaseInput['state']; expectClashes?: [string, string][]; floorClashes?: [string, string][]; id?: string } = {}): Built => {
