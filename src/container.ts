@@ -465,10 +465,12 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const routineCheckInsRepository = once(() => new D1RoutineCheckInsRepository(db()))
+
   const routineCheckIns = once(
     () =>
       new RoutineCheckInsService({
-        repository: new D1RoutineCheckInsRepository(db()),
+        repository: routineCheckInsRepository(),
         versions: new D1RoutinesRepository(db()),
         reminders: reminders(),
       }),
@@ -487,6 +489,8 @@ export const buildContainer = (env: CloudflareBindings) => {
         repository: new D1RoutinesRepository(db()),
         skinCare: skinCare(),
         reminders: reminders(),
+        checkIns: routineCheckInsRepository(),
+        inbox: inbox(),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
         enabled: env.ROUTINES_ENABLED === 'true',
         now: () => new Date(),
