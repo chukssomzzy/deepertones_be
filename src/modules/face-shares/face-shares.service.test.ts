@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { type Actor, runAs } from '../../lib/context'
+import { MemoryPhotoStore } from '../../providers/photo-store/memory.photo-store'
+import { MemoryShareCardRenderer } from '../../providers/share-card/memory.share-card-renderer'
 import { FakeFaceSharesRepository } from './face-shares.repository.fake'
 import { FaceSharesService } from './face-shares.service'
 
@@ -59,7 +61,16 @@ let service: FaceSharesService
 beforeEach(() => {
   clock = T0
   repository = new FakeFaceSharesRepository()
-  service = new FaceSharesService({ repository, now: () => clock })
+  service = new FaceSharesService({
+    repository,
+    // Making the card is face-shares.share.test.ts's concern; nothing here reaches these.
+    faceScans: { beforeAndAfterFor: async () => ({ before: null, after: null }) },
+    photos: new MemoryPhotoStore({ environment: 'test' }),
+    renderer: new MemoryShareCardRenderer(),
+    readLogo: async () => ({ bytes: new Uint8Array(), mediaType: 'image/png' }),
+    opsAlerts: { raise: async () => undefined },
+    now: () => clock,
+  })
 })
 
 const give = (who: Actor, version: number = CURRENT) => runAs(who, () => service.giveConsent(version))

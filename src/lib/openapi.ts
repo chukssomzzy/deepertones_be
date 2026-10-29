@@ -112,11 +112,12 @@ const binary = () => z.string().openapi({ type: 'string', format: 'binary' })
 /**
  * A 200 that is an image, not the envelope: `200: imageResponse('The photo')`. The handler sends the bytes with
  * its own Content-Type and Cache-Control. Any status with a non-JSON body makes the compiler accept any return from
- * that route's handler, so the integration tests are what checks it.
+ * that route's handler, so the integration tests are what checks it. The media types default to a JPEG or WebP photo;
+ * a route that answers something else says which: `imageResponse('The card', ['image/png'])`.
  */
-export const imageResponse = (description: string) => ({
+export const imageResponse = (description: string, mediaTypes: readonly ('image/jpeg' | 'image/png' | 'image/webp')[] = ['image/jpeg', 'image/webp']) => ({
   description,
-  content: { 'image/jpeg': { schema: binary() }, 'image/webp': { schema: binary() } },
+  content: Object.fromEntries(mediaTypes.map((mediaType) => [mediaType, { schema: binary() }])) as Record<string, { schema: ReturnType<typeof binary> }>,
 })
 
 /** A 200 that is a server-sent event stream, not the envelope: `200: sseResponse('Progress, as it happens')`. Same compiler caveat as imageResponse. */

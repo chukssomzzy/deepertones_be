@@ -3800,6 +3800,19 @@
           "current"
         ]
       },
+      "ShareFaceTimelineBody": {
+        "type": "object",
+        "properties": {
+          "afterScanId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The face scan to show as \"after\": a later ready scan of the current goal, with a front photo, at least 14 days after day one."
+          }
+        },
+        "required": [
+          "afterScanId"
+        ]
+      },
       "ProductSearch": {
         "type": "object",
         "properties": {
@@ -10451,6 +10464,134 @@
           },
           "500": {
             "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/face-timeline/share": {
+      "post": {
+        "operationId": "shareFaceTimeline",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "Make the before-and-after card to share",
+        "description": "Makes a 1080 x 1920 card of the user's day one face photo and the one in `afterScanId`, labelled \"Day 1\" and \"Day N\", and answers it as a PNG with `Cache-Control: private, no-store`. The photos are only resized, never edited, and the card is made for this request and written nowhere by this service. Every goal may share, the fairer goal included. For a signed-up account, checked in this order: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `SHARE_CONSENT_REQUIRED` without a current face share consent, 409 `NO_DAY_ONE_PHOTO` when the current goal has no day one photo yet, 404 `FACE_SCAN_NOT_FOUND` when `afterScanId` is not a later ready scan of the same goal run with a front photo (an unknown scan, another profile's, day one itself and the rest are not told apart), 409 `SHARE_TOO_EARLY` when it is less than 14 days after day one in the user's own calendar days (N is the days since day one plus one). 503 `SHARE_UNAVAILABLE` when the card cannot be made right now, whatever the cause; nothing is recorded then, and trying again later is fine. A card that is made is recorded as one share. 429 `RATE_LIMITED` past 10 requests a minute per user.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShareFaceTimelineBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The card",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
             "content": {
               "application/json": {
                 "schema": {

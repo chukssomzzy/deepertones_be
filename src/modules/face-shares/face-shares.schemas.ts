@@ -19,3 +19,7 @@ export const FaceShareConsentResponse = z
     current: z.boolean().openapi({ description: 'True while the consent is for the current wording and has not been withdrawn: the only consent a share accepts.' }),
   })
   .openapi('FaceShareConsentResponse')
+
+export const ShareFaceTimelineBody = z
+  .object({ afterScanId: z.string().min(1).openapi({ description: 'The face scan to show as "after": a later ready scan of the current goal, with a front photo, at least 14 days after day one.' }) })
+  .openapi('ShareFaceTimelineBody')
