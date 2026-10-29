@@ -114,7 +114,6 @@ export class RoutineCheckInsService {
     ]
   }
 
-  // Copy awaiting the owner's sign-off.
   private async writeAllDone(profileId: string, day: string): Promise<void> {
     try {
       const done = await this.checkedTimes(profileId, day)

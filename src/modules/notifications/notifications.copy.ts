@@ -21,7 +21,7 @@ export const pauseCheckInText = (): { title: string; body: string } => ({
   body: 'Tell us how your skin has been since your pause.',
 })
 
-/** The row of a day on which every half with something to do is done. Awaiting the owner's sign-off. */
+/** The row of a day on which every half with something to do is done. */
 export const allDoneText = (): { title: string; body: string } => ({
   title: 'Routine done',
   body: 'You did your morning and your evening routine. Well done.',
