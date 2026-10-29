@@ -1,12 +1,13 @@
 import { createExecutionContext } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
 import { hc } from 'hono/client'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import worker, { type AppType } from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import type { EmailAddress } from '../../src/lib/email-address'
 import { parsePhoneNumber } from '../../src/lib/phone'
 import { TokenService } from '../../src/modules/auth/tokens.service'
+import { InboxService } from '../../src/modules/inbox/inbox.service'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { ProfilesService } from '../../src/modules/profiles/profiles.service'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
@@ -232,5 +233,87 @@ describe('PUT /api/v1/me/reminders', () => {
 
     expect(res.status).toBe(401)
     expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+  })
+})
+
+// The reminders-off row (spec #233, PR 8b). PUT /me/reminders that turns reminders from on to off writes one inbox row, `reminders-off:<day>`, kind 'reminders-off', for the profile's local
+// day in its stored zone, once that day. Turning them off when they are already off (or were never on) writes nothing, and nor does any change that leaves them on. A row that cannot be
+// written never fails the update. The Worker runs on the real clock, so the day is read off Intl for the zone the account stored, in two zones 25 hours apart (UTC+14 and UTC-11) whose
+// calendar days always differ, so a row dated by UTC cannot pass for both.
+const KIRITIMATI = 'Pacific/Kiritimati'
+const PAGO_PAGO = 'Pacific/Pago_Pago'
+const dayIn = (zone: string, at = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(at)
+type InboxRow = { id: string; kind: string; day: string; title: string; body: string; link: string; read: boolean }
+const inboxOf = async (bearer: string) => (await dataOf<{ items: InboxRow[] }>(await v1.me.inbox.$get({ query: { limit: '50' } as never }, { headers: headers(bearer) }))).items
+const offRows = async (bearer: string) => (await inboxOf(bearer)).filter((row) => row.kind === 'reminders-off')
+
+describe('PUT /api/v1/me/reminders: the reminders-off row', () => {
+  it.each([
+    ['UTC+14', KIRITIMATI],
+    ['UTC-11', PAGO_PAGO],
+  ])('writes one row, for the local day in the stored zone (%s), when reminders go from on to off', async (_name, zone) => {
+    const { accessToken } = await newVerified()
+    await putReminders(accessToken, { enabled: true, timeZone: zone })
+    const before = dayIn(zone)
+
+    expect((await putReminders(accessToken, { enabled: false })).status).toBe(200)
+
+    const after = dayIn(zone)
+    const rows = await offRows(accessToken)
+    expect(rows).toHaveLength(1)
+    expect([before, after]).toContain(rows[0]!.day)
+    expect(rows[0]).toMatchObject({ kind: 'reminders-off', read: false })
+    expect(rows[0]!.title.length).toBeGreaterThan(0)
+    expect(rows[0]!.body.length).toBeGreaterThan(0)
+    expect(rows[0]!.link).toMatch(/^\/(?!\/)/)
+  })
+
+  it('writes the row with the zone named in the same call that turns reminders off', async () => {
+    const { accessToken } = await newVerified()
+    await putReminders(accessToken, { enabled: true, timeZone: PAGO_PAGO })
+
+    await putReminders(accessToken, { enabled: false, timeZone: KIRITIMATI })
+
+    expect([dayIn(KIRITIMATI), dayIn(KIRITIMATI, new Date(Date.now() - 1000))]).toContain((await offRows(accessToken))[0]!.day)
+  })
+
+  it('writes it once a day: turning reminders off again, or on and off again, the same day makes no second row', async () => {
+    const { accessToken } = await newVerified()
+    await putReminders(accessToken, { enabled: true, timeZone: KIRITIMATI })
+    await putReminders(accessToken, { enabled: false })
+
+    await putReminders(accessToken, { enabled: false })
+    await putReminders(accessToken, { enabled: true })
+    await putReminders(accessToken, { enabled: false })
+
+    expect(await offRows(accessToken)).toHaveLength(1)
+  })
+
+  it.each([
+    ['reminders that were never on', async (token: string) => putReminders(token, { enabled: false, timeZone: KIRITIMATI })],
+    ['a change that leaves them on', async (token: string) => { await putReminders(token, { enabled: true }); return putReminders(token, { morning: '06:30', timeZone: PAGO_PAGO }) }],
+    ['a change that does not name the switch', async (token: string) => putReminders(token, { timeZone: KIRITIMATI })],
+  ])('writes nothing for %s', async (_name, change) => {
+    const { accessToken } = await newVerified()
+
+    expect((await change(accessToken)).status).toBe(200)
+
+    expect(await offRows(accessToken)).toEqual([])
+  })
+
+  it('still turns reminders off, answers 200 and logs the failure by the profile id alone, when the row cannot be written', async () => {
+    const { accessToken, profileId } = await newVerified()
+    await putReminders(accessToken, { enabled: true, timeZone: KIRITIMATI })
+    vi.spyOn(InboxService.prototype, 'write').mockRejectedValue(new Error('the database is down for ExponentPushToken[abc]'))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    const res = await putReminders(accessToken, { enabled: false })
+
+    expect(res.status).toBe(200)
+    expect(await dataOf<Reminders>(res)).toMatchObject({ enabled: false })
+    expect(await dataOf<Reminders>(await getReminders(accessToken))).toMatchObject({ enabled: false })
+    expect(JSON.stringify(logged.mock.calls)).toContain(profileId)
+    expect(JSON.stringify(logged.mock.calls)).not.toContain('ExponentPushToken[abc]')
+    vi.restoreAllMocks()
   })
 })

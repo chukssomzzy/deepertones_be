@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Actor, runAs } from '../../lib/context'
 import type { PhoneNumber } from '../../lib/phone'
+import { FakeInboxRepository } from '../inbox/inbox.repository.fake'
+import { InboxService, type InboxWrite } from '../inbox/inbox.service'
 import type { ProfilesService } from '../profiles/profiles.service'
 import type { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
@@ -78,6 +80,7 @@ const makeService = (whatsappEnabled: boolean) =>
     users: { get: async (id: string) => userRow(id) } satisfies Pick<UsersService, 'get'>,
     profiles: { find: async (id: string) => (owners.has(id) ? { id, userId: owners.get(id)!, ownerStatus: 'verified' as const } : null) } satisfies Pick<ProfilesService, 'find'>,
     whatsappEnabled,
+    inbox: { write: async () => ({ id: 'unused', created: true }) },
     now: () => T0,
   })
 
@@ -485,6 +488,7 @@ describe('RemindersService.update: enabledOn', () => {
       users: { get: async (id: string) => userRow(id) } satisfies Pick<UsersService, 'get'>,
       profiles: { find: async () => null } as unknown as Pick<ProfilesService, 'find'>,
       whatsappEnabled: false,
+      inbox: { write: async () => ({ id: 'unused', created: true }) },
       now: () => clock,
     })
   })
@@ -551,5 +555,160 @@ describe('RemindersService.update: enabledOn', () => {
     await errorOf(update(AMARA_ACTOR, { enabled: true, morning: '25:00' }))
 
     expect(await repository.get(AMARA)).toBeNull()
+  })
+})
+
+// The reminders-off row (spec #233, PR 8b). `update` that turns reminders from on to off writes one inbox row, key `reminders-off:<day>`, kind 'reminders-off', for the profile's LOCAL day
+// (the zone the row will have after the update, UTC with none), so a day has at most one. Turning them off when they were already off, never on, or leaving them on writes nothing. A row that
+// cannot be written is logged by the profile id alone and never fails the update.
+//
+// THE CONTRACT THIS FILE PINS (assumed: the brief names the key and the behaviour, not the constructor):
+//   new RemindersService({ ..., inbox })   inbox: Pick<InboxService, 'write'>   the test hands it a recorder around the real InboxService over its real fake
+describe('RemindersService.update: the reminders-off row', () => {
+  let clock: Date
+  let inbox: InboxService
+  let attempted: InboxWrite[]
+  let inboxFails: boolean
+  const at = (iso: string) => {
+    clock = new Date(iso)
+  }
+
+  beforeEach(() => {
+    clock = T0
+    inboxFails = false
+    attempted = []
+    inbox = new InboxService({ repository: new FakeInboxRepository(), now: () => clock })
+    service = new RemindersService({
+      repository,
+      users: { get: async (id: string) => userRow(id) } satisfies Pick<UsersService, 'get'>,
+      profiles: { find: async () => null } satisfies Pick<ProfilesService, 'find'>,
+      whatsappEnabled: false,
+      now: () => clock,
+      inbox: {
+        write: async (input: InboxWrite) => {
+          attempted.push(input)
+          if (inboxFails) throw new Error('the inbox is down for ExponentPushToken[abc] Reminders are off')
+          return inbox.write(input)
+        },
+      },
+    })
+  })
+
+  const keys = () => attempted.map(({ key }) => key)
+  const rows = (who: Actor = AMARA_ACTOR) => runAs(who, async () => (await inbox.list({ limit: 50 })).items)
+
+  it('writes one row when reminders go from on to off, and none for turning them on', async () => {
+    await update(AMARA_ACTOR, { enabled: true, timeZone: 'Africa/Lagos' })
+    expect(keys()).toEqual([])
+
+    await update(AMARA_ACTOR, { enabled: false })
+
+    expect(keys()).toEqual(['reminders-off:2030-06-15'])
+    expect(attempted[0]).toMatchObject({ profileId: AMARA, kind: 'reminders-off', day: '2030-06-15' })
+    expect(attempted[0]!.title.length).toBeGreaterThan(0)
+    expect(attempted[0]!.body.length).toBeGreaterThan(0)
+    expect(attempted[0]!.link).toMatch(/^\/(?!\/)/)
+    expect(await rows()).toHaveLength(1)
+  })
+
+  // The day is the profile's own: Lagos is UTC+1 all year, New York UTC-4 in June. Both ends of the edge.
+  it.each([
+    ['Lagos, 1 ms before its midnight', 'Africa/Lagos', '2030-06-15T22:59:59.999Z', '2030-06-15'],
+    ['Lagos, at its midnight', 'Africa/Lagos', '2030-06-15T23:00:00.000Z', '2030-06-16'],
+    ['New York, 1 ms before its midnight', 'America/New_York', '2030-06-16T03:59:59.999Z', '2030-06-15'],
+    ['New York, at its midnight', 'America/New_York', '2030-06-16T04:00:00.000Z', '2030-06-16'],
+    ['no zone stored, which is UTC, at its midnight', null, '2030-06-16T00:00:00.000Z', '2030-06-16'],
+  ])('dates the row by the local day in the stored zone: %s', async (_name, zone, instant, expected) => {
+    at('2030-06-10T12:00:00.000Z')
+    await update(AMARA_ACTOR, { enabled: true, timeZone: zone })
+    at(instant)
+
+    await update(AMARA_ACTOR, { enabled: false })
+
+    expect(keys()).toEqual([`reminders-off:${expected}`])
+    expect(attempted[0]!.day).toBe(expected)
+  })
+
+  it('dates the row by the zone named in the same call that turns reminders off', async () => {
+    await update(AMARA_ACTOR, { enabled: true, timeZone: 'America/New_York' })
+    // 23:30 UTC on the 15th is 00:30 on the 16th in Lagos and 19:30 on the 15th in New York.
+    at('2030-06-15T23:30:00.000Z')
+
+    await update(AMARA_ACTOR, { enabled: false, timeZone: 'Africa/Lagos' })
+
+    expect(keys()).toEqual(['reminders-off:2030-06-16'])
+  })
+
+  it('writes nothing when reminders are turned off while they are already off, or were never on', async () => {
+    await update(AMARA_ACTOR, { enabled: false })
+    await update(AMARA_ACTOR, { enabled: true })
+    await update(AMARA_ACTOR, { enabled: false })
+    expect(keys()).toEqual(['reminders-off:2030-06-15'])
+
+    await update(AMARA_ACTOR, { enabled: false })
+    await update(AMARA_ACTOR, { enabled: false, morning: '06:30' })
+
+    expect(keys()).toEqual(['reminders-off:2030-06-15'])
+    expect(await rows()).toHaveLength(1)
+  })
+
+  it('writes nothing for a change that does not name the switch, or leaves reminders on', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+
+    await update(AMARA_ACTOR, { timeZone: 'Africa/Lagos' })
+    await update(AMARA_ACTOR, { enabled: true, morning: '06:30' })
+    await update(AMARA_ACTOR, { stepDownAlerts: false })
+
+    expect(keys()).toEqual([])
+  })
+
+  it('writes one row a day however often reminders are turned off that day, and another the next day', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+    await update(AMARA_ACTOR, { enabled: false })
+    await update(AMARA_ACTOR, { enabled: true })
+    await update(AMARA_ACTOR, { enabled: false })
+
+    expect([...new Set(keys())]).toEqual(['reminders-off:2030-06-15'])
+    expect(await rows()).toHaveLength(1)
+
+    at('2030-06-16T12:00:00.000Z')
+    await update(AMARA_ACTOR, { enabled: true })
+    await update(AMARA_ACTOR, { enabled: false })
+
+    expect((await rows()).map(({ day }) => day).sort()).toEqual(['2030-06-15', '2030-06-16'])
+  })
+
+  it('writes the row into the profile that turned reminders off and no other', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+    await update(TOLU_ACTOR, { enabled: true })
+
+    await update(AMARA_ACTOR, { enabled: false })
+
+    expect(await rows(AMARA_ACTOR)).toHaveLength(1)
+    expect(await rows(TOLU_ACTOR)).toEqual([])
+  })
+
+  it('writes nothing for an update that is refused, and turns nothing off', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+
+    await errorOf(update(AMARA_ACTOR, { enabled: false, morning: '25:00' }))
+
+    expect(keys()).toEqual([])
+    expect((await settings(AMARA_ACTOR)).enabled).toBe(true)
+  })
+
+  it('turns reminders off, answers the settings and logs the failure by the profile id alone, when the row cannot be written', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+    inboxFails = true
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await expect(update(AMARA_ACTOR, { enabled: false })).resolves.toMatchObject({ enabled: false })
+
+    expect((await settings(AMARA_ACTOR)).enabled).toBe(false)
+    const text = JSON.stringify(logged.mock.calls)
+    expect(text).toContain(AMARA)
+    expect(text).not.toContain('ExponentPushToken')
+    expect(text).not.toContain('Reminders are off')
+    vi.restoreAllMocks()
   })
 })

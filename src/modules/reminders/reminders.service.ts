@@ -1,6 +1,7 @@
 import { requireUser } from '../../lib/context'
 import { ForbiddenError, ValidationError } from '../../lib/errors'
 import { localDay } from '../../lib/local-day'
+import type { InboxService } from '../inbox/inbox.service'
 import type { ProfilesService } from '../profiles/profiles.service'
 import type { UsersService } from '../users/users.service'
 import type { RemindersRepository } from './reminders.repository'
@@ -14,6 +15,8 @@ export type RemindersServiceDeps = {
   profiles: Pick<ProfilesService, 'find'>
   /** Whether WhatsApp is an enabled OTP channel in this environment; the container derives it from OTP_CHANNELS. */
   whatsappEnabled: boolean
+  /** Where turning reminders off tells the person (the `reminders-off` inbox row). */
+  inbox: Pick<InboxService, 'write'>
   now?: () => Date
 }
 
@@ -45,6 +48,7 @@ export class RemindersService {
   private readonly users: RemindersServiceDeps['users']
   private readonly profiles: RemindersServiceDeps['profiles']
   private readonly whatsappEnabled: boolean
+  private readonly inbox: RemindersServiceDeps['inbox']
   private readonly now: () => Date
 
   constructor(deps: RemindersServiceDeps) {
@@ -52,6 +56,7 @@ export class RemindersService {
     this.users = deps.users
     this.profiles = deps.profiles
     this.whatsappEnabled = deps.whatsappEnabled
+    this.inbox = deps.inbox
     this.now = deps.now ?? (() => new Date())
   }
 
@@ -66,11 +71,18 @@ export class RemindersService {
    * route's body schema runs first (wrong types, an unknown field, an empty body: 400), so a guest sending a malformed body gets that 400, not the 403. Then 400
    * `VALIDATION_FAILED` for a time that is not 24-hour 'HH:MM' or a zone Intl does not know (a refused call stores nothing). The zone is stored under
    * its canonical name; a null zone clears it.
+   *
+   * A change from on to off writes one inbox row, `reminders-off:{day}`, for the local day in the zone the row has after the change (so a zone named in the same call counts); turning them
+   * off again, or off when they were never on, writes nothing. The row is not the update: if it cannot be written the update stands, and the failure is logged by the profile id alone.
    */
   async update(patch: ReminderSettingsPatch): Promise<ReminderSettingsView> {
     const { userId, profileId } = RemindersService.signedUp()
     const checked = RemindersService.checked(patch)
-    return this.viewOf(userId, await this.repository.upsert(profileId, await this.withEnabledOn(profileId, checked), this.now()))
+    const wasOn = checked.enabled === false && ((await this.repository.get(profileId))?.enabled ?? false)
+    const now = this.now()
+    const saved = await this.repository.upsert(profileId, await this.withEnabledOn(profileId, checked), now)
+    if (wasOn) await this.writeRemindersOff(profileId, localDay(now, saved.timeZone))
+    return this.viewOf(userId, saved)
   }
 
   /** The profile's stored time zone by profile id, with no session (a job and the routine service call it); null while none is stored. */
@@ -117,6 +129,23 @@ export class RemindersService {
     if (current?.enabled) return patch
     const zone = patch.timeZone === undefined ? (current?.timeZone ?? null) : patch.timeZone
     return { ...patch, enabledOn: localDay(this.now(), zone) }
+  }
+
+  // Copy awaiting the owner's sign-off.
+  private async writeRemindersOff(profileId: string, day: string): Promise<void> {
+    try {
+      await this.inbox.write({
+        profileId,
+        kind: 'reminders-off',
+        day,
+        title: 'Reminders are off',
+        body: 'You will not get reminders until you turn them back on. Your routine is still here.',
+        link: '/routine',
+        key: `reminders-off:${day}`,
+      })
+    } catch {
+      console.error({ outcome: 'reminders-off-inbox-write-failed', profileId })
+    }
   }
 
   private static signedUp() {

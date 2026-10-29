@@ -2763,8 +2763,18 @@ describe('RoutineViewerService.today', () => {
 
   describe('ticking off a half', () => {
     // The real write path: POST /me/routine/check-ins is RoutineCheckInsService.checkIn, over the same fake repository the viewer reads the day's check-ins from.
+    // The all-done row is the check-ins service's own (its tests cover it); Today reads only the day's check-ins, so the inbox and the plan are stubs.
     const tick = (time: 'morning' | 'evening', day = localDay(clock, world.zone)) =>
-      asVerified(() => new RoutineCheckInsService({ repository: checkInsRepository, versions: repository, reminders: { zoneFor: async () => world.zone }, now: () => clock }).checkIn(day, time))
+      asVerified(() =>
+        new RoutineCheckInsService({
+          repository: checkInsRepository,
+          versions: repository,
+          reminders: { zoneFor: async () => world.zone },
+          inbox: { write: async () => ({ id: 'unused', created: true }) },
+          routine: { reminderPlanFor: async () => null },
+          now: () => clock,
+        }).checkIn(day, time),
+      )
 
     beforeEach(async () => {
       await started()

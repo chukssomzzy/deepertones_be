@@ -216,3 +216,58 @@ describe('routine_requests in D1', () => {
     expect(await repository.claim(guest.profileId, 'routine-fp-1', new Date(requestedAt.getTime() + 1), requestedAt)).toBe(true)
   })
 })
+
+// The 15-minute reminder cron lists the profiles with a Started routine once and queues one message for each (spec #233, PR 8a).
+describe('the started profiles in D1', () => {
+  const STARTED = new Date(BASE.getTime() + 2 * HOUR)
+  const pending = (profileId: string, createdAt: Date, over: Partial<Appended> = {}) =>
+    rowFor(profileId, createdAt, { status: 'pending', steps: [], expectation: null, cautions: null, goal: null, readyAt: null, model: null, promptHash: null, catalogVersion: null, routineFingerprint: null, source: null, writerCalls: 0, ...over })
+
+  it('lists a profile whose routine was Started, once however many versions carry the start, and no profile whose routine was not', async () => {
+    const repository = new D1RoutinesRepository(db)
+    const started = await newGuest()
+    await repository.append(rowFor(started.profileId, BASE))
+    await repository.markStarted(started.profileId, STARTED)
+    // A rebuild carries the start forward, so the profile now has two Started versions.
+    await repository.append(rowFor(started.profileId, new Date(BASE.getTime() + 3 * HOUR), { startedOn: STARTED }))
+    const rebuilding = await newGuest()
+    await repository.append(rowFor(rebuilding.profileId, BASE))
+    await repository.markStarted(rebuilding.profileId, STARTED)
+    // A rebuild asked for and not done yet: its row has no start, but the routine in force is Started.
+    await repository.append(pending(rebuilding.profileId, new Date(BASE.getTime() + 3 * HOUR)))
+    const ready = await newGuest()
+    await repository.append(rowFor(ready.profileId, BASE))
+    const building = await newGuest()
+    await repository.append(pending(building.profileId, BASE))
+    const none = await newGuest()
+
+    const ids = await repository.startedProfileIds()
+
+    expect(ids.filter((id) => id === started.profileId)).toHaveLength(1)
+    expect(ids.filter((id) => id === rebuilding.profileId)).toHaveLength(1)
+    for (const profile of [ready, building, none]) expect(ids).not.toContain(profile.profileId)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it('answers the same list as the profiles that have a Started version', async () => {
+    const repository = new D1RoutinesRepository(db)
+    const guest = await newGuest()
+    await repository.append(rowFor(guest.profileId, BASE))
+    await repository.markStarted(guest.profileId, STARTED)
+
+    const ids = await repository.startedProfileIds()
+
+    const rows = await env.DB.prepare('SELECT DISTINCT profile_id AS id FROM routine_versions WHERE started_on IS NOT NULL').all<{ id: string }>()
+    expect([...ids].sort()).toEqual(rows.results.map(({ id }) => id).sort())
+  })
+
+  it('has a partial index on the started routine rows, so the list is read from the few and not by scanning every version', async () => {
+    const indexes = await env.DB.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'routine_versions' AND sql IS NOT NULL").all<{ name: string; sql: string }>()
+
+    const partial = indexes.results.filter(({ sql }) => /where\s+["`]?(routine_versions["`]?\.["`]?)?started_on["`]?\s+is\s+not\s+null/i.test(sql))
+
+    expect(partial.map(({ name }) => name)).toHaveLength(1)
+    // It holds the profile id, which is what the list reads, so the table itself is not touched.
+    expect(partial[0]!.sql).toMatch(/profile_id/)
+  })
+})

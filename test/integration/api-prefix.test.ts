@@ -162,6 +162,7 @@ describe('the OpenAPI document', () => {
         'PUT /api/v1/me/reminders',
         'GET /api/v1/me/inbox',
         'POST /api/v1/me/inbox/read',
+        'POST /api/v1/me/inbox/{id}/read',
         'POST /api/v1/me/skin-logs',
         'GET /api/v1/me/skin-logs',
         'POST /api/v1/me/skin-care/pauses/{id}/undo',

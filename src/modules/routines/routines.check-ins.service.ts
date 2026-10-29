@@ -1,7 +1,11 @@
 import { requireUser } from '../../lib/context'
 import { ConflictError, ForbiddenError, ValidationError } from '../../lib/errors'
 import { localDay, usableZone } from '../../lib/local-day'
+import type { InboxService } from '../inbox/inbox.service'
+import { dueOnDay } from '../catalog/catalog.frequency'
+import { allDoneText } from '../notifications/notifications.copy'
 import type { RemindersService } from '../reminders/reminders.service'
+import type { ReminderRoutinePlan } from '../reminders/reminders.types'
 import type { RoutineCheckInsRepository, CheckInTime } from './routines.check-ins.repository'
 import type { RoutinesRepository } from './routines.repository'
 
@@ -11,6 +15,10 @@ export type RoutineCheckInsServiceDeps = {
   versions: Pick<RoutinesRepository, 'current'>
   /** Read for the zone that decides what today is. */
   reminders: Pick<RemindersService, 'zoneFor'>
+  /** Where the check-in that completes a day tells the person (the `all-done` inbox row). */
+  inbox: Pick<InboxService, 'write'>
+  /** The routine as the reminder job reads it (RoutineViewerService.reminderPlanFor), for which halves of a day have entries due. Null while the routine is not Started. */
+  routine: { reminderPlanFor(profileId: string): Promise<Pick<ReminderRoutinePlan, 'dayOne' | 'morning' | 'evening'> | null> }
   now?: () => Date
 }
 
@@ -26,12 +34,16 @@ export class RoutineCheckInsService {
   private readonly repository: RoutineCheckInsRepository
   private readonly versions: RoutineCheckInsServiceDeps['versions']
   private readonly reminders: RoutineCheckInsServiceDeps['reminders']
+  private readonly inbox: RoutineCheckInsServiceDeps['inbox']
+  private readonly routine: RoutineCheckInsServiceDeps['routine']
   private readonly now: () => Date
 
   constructor(deps: RoutineCheckInsServiceDeps) {
     this.repository = deps.repository
     this.versions = deps.versions
     this.reminders = deps.reminders
+    this.inbox = deps.inbox
+    this.routine = deps.routine
     this.now = deps.now ?? (() => new Date())
   }
 
@@ -39,6 +51,9 @@ export class RoutineCheckInsService {
    * Records the session profile's check-in for `day` and answers what was recorded. Gates, in order: 401, 403 `SIGNUP_REQUIRED` for a guest, 409 `ROUTINE_NOT_STARTED`
    * while the routine in force has no day 1, then 400 `VALIDATION_FAILED` unless `day` is a real calendar date that is today or yesterday in the person's local day (their
    * stored zone, else UTC) and is not before day 1. A refused call stores nothing. Idempotent: a check-in already held is the same answer and is not stored again.
+   *
+   * The check-in that leaves every half of the day that has something to do checked in writes one inbox row, `all-done:{day}` (the check-in's own day, which may be yesterday). A half with
+   * no entries due that day (an evening of alternate-days entries on a rest night, say) needs no check-in, but at least one half must be checked in. The key makes a repeat a no-op. The row is not the check-in: if it cannot be written the check-in stands, and the failure is logged by the profile id alone.
    */
   async checkIn(day: string, time: CheckInTime): Promise<{ day: string; time: CheckInTime }> {
     const { profileId, status } = requireUser()
@@ -52,6 +67,7 @@ export class RoutineCheckInsService {
       throw new ValidationError('VALIDATION_FAILED', 'day must be today or yesterday, and not before your first day')
     }
     await this.repository.record(profileId, day, time, now)
+    await this.writeAllDone(profileId, day)
     return { day, time }
   }
 
@@ -72,6 +88,43 @@ export class RoutineCheckInsService {
     const since = lastDone === null ? dayOne : RoutineCheckInsService.shift(lastDone, 1)
     if (since > yesterday) return none
     return { days: RoutineCheckInsService.daysBetween(since, yesterday) + 1, since }
+  }
+
+  /** The halves of the local day `day` the profile has checked in, by profile id with no session (the reminder job reads it for a rest night's all-done row). */
+  async checkedTimes(profileId: string, day: string): Promise<CheckInTime[]> {
+    return (await this.repository.list(profileId, day, day)).map((row) => row.time)
+  }
+
+  /**
+   * The halves of `day` that have something to do: the morning lists every entry, the evening only those due that day (as the reminder does). A routine that cannot be read (none Started
+   * that the plan can show, or a profile whose shopping country is not set yet) asks for both halves, which is the strict side: the row then waits for the whole day.
+   */
+  private async owedHalves(profileId: string, day: string): Promise<CheckInTime[]> {
+    let plan: Awaited<ReturnType<RoutineCheckInsServiceDeps['routine']['reminderPlanFor']>>
+    try {
+      plan = await this.routine.reminderPlanFor(profileId)
+    } catch {
+      plan = null
+    }
+    if (plan === null) return ['morning', 'evening']
+    const { dayOne } = plan
+    return [
+      ...(plan.morning.length > 0 ? ['morning' as const] : []),
+      ...(plan.evening.some(({ frequency, anchor }) => dueOnDay(frequency, anchor ?? dayOne, day)) ? ['evening' as const] : []),
+    ]
+  }
+
+  // Copy awaiting the owner's sign-off.
+  private async writeAllDone(profileId: string, day: string): Promise<void> {
+    try {
+      const done = await this.checkedTimes(profileId, day)
+      if (done.length === 0) return
+      const owed = await this.owedHalves(profileId, day)
+      if (!owed.every((time) => done.includes(time))) return
+      await this.inbox.write({ profileId, kind: 'all-done', day, ...allDoneText(), link: '/routine', key: `all-done:${day}` })
+    } catch {
+      console.error({ outcome: 'all-done-inbox-write-failed', profileId })
+    }
   }
 
   private static dateOf(startedOn: Date): string {

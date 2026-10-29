@@ -17,6 +17,7 @@ import type { RecommendationService } from '../recommendations/recommendations.s
 import type { Candidate } from '../recommendations/recommendations.types'
 import type { RemindersService } from '../reminders/reminders.service'
 import type { SafetyService } from '../safety/safety.service'
+import type { StartedProfile } from '../reminders/reminders.types'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
 import type { SkinCareService } from '../skin-care/skin-care.service'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
@@ -279,6 +280,11 @@ export class RoutineService {
     } catch (error) {
       console.error({ outcome: 'routine-stale-check-failed', profileId, error: describeError(error) })
     }
+  }
+
+  /** Every profile whose routine was Started, once each, with its reminder settings (null columns with no settings row): the 15-minute reminder cron's list, in one statement. */
+  async startedProfiles(): Promise<StartedProfile[]> {
+    return this.repository.startedProfiles()
   }
 
   /**

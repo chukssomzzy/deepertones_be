@@ -1,0 +1,1 @@
+CREATE INDEX `routine_versions_started_idx` ON `routine_versions` (`profile_id`) WHERE "routine_versions"."started_on" IS NOT NULL;

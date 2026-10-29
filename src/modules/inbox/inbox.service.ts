@@ -81,6 +81,17 @@ export class InboxService {
     return { unread: await this.repository.unreadCount(profileId) }
   }
 
+  /**
+   * Marks that one row read and no other (the tap on a push, which carries the row's id), and answers the profile's unread count after. Idempotent; a row already read keeps its time.
+   * 401, 403 `SIGNUP_REQUIRED`, and 404 `INBOX_ITEM_NOT_FOUND` for a row the profile does not hold (another profile's included; nothing is marked).
+   */
+  async markOneRead(id: string): Promise<{ unread: number }> {
+    const { profileId } = InboxService.signedUp()
+    await this.held(profileId, id)
+    await this.repository.markRead(profileId, id, this.now())
+    return { unread: await this.repository.unreadCount(profileId) }
+  }
+
   /** Marks that one row read, by profile id with no session (a push tap). An id the profile does not hold changes nothing and does not fail. */
   async markReadById(profileId: string, id: string): Promise<void> {
     await this.repository.markRead(profileId, id, this.now())

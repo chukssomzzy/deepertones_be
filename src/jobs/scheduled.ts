@@ -48,19 +48,20 @@ export const createScanReaper = (): ScheduledHandler => async (_controller, env)
 }
 
 /**
- * The reminder send job (ReminderSendsService.sendDue), every 15 minutes: queues the morning and evening pushes whose time was reached in the quarter hour that is
- * starting. It is given the time the cron was SCHEDULED for, not the moment the Worker started, so a late start still looks at its own window and the next run at the
- * next. It reads no request context, so it needs no actor. A failure is logged and rethrown so Cloudflare records the run as failed; the log carries no error text, since
- * nothing in it may name a person. The next run looks at its own window, and the claims keep a reminder from being sent twice.
+ * The reminder fan-out (ReminderFanOutService.fanOut), every 15 minutes: queues one `reminder-profile` message for each profile with a Started routine and a reminder time
+ * due in the slot, and does nothing else. The queue consumer does each profile's reminder work (ReminderSendsService.sendForProfile) for the quarter hour that is starting. The messages carry the time the
+ * cron was SCHEDULED for, not the moment the Worker started, so a late start or a retry still looks at its own window. It reads no request context, so it needs no actor.
+ * A failure is logged (the error by its class, never its text) and rethrown so Cloudflare records the run as failed. A failed scheduled run is NOT retried: the slot's profiles that
+ * were not queued miss that quarter hour, and the next run looks at its own.
  */
 export const createReminderSend = (): ScheduledHandler => async (controller, env) => {
   const job = 'reminder-send'
   try {
-    const queued = await buildContainer(env).reminderSends.sendDue(new Date(controller.scheduledTime))
+    const queued = await buildContainer(env).reminderFanOut.fanOut(new Date(controller.scheduledTime))
     // Every run, including 0: the heartbeat that says the cron is firing.
     console.log({ job, outcome: 'done', queued })
   } catch (error) {
-    console.error({ job, outcome: 'failed' })
+    console.error({ job, outcome: 'failed', error: describeError(error) })
     throw error
   }
 }

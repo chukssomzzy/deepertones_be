@@ -70,6 +70,8 @@ export const routineVersions = sqliteTable(
     index('routine_versions_profile_created_idx').on(t.profileId, t.createdAt),
     // The writer-retry sweep's lookup (PR 3): only the rows with a retry due, a small set, by due time.
     index('routine_versions_writer_retry_due_idx').on(t.writerRetryDueAt).where(sql`${t.writerRetryDueAt} IS NOT NULL`),
+    // The 15-minute reminder cron's list of Started profiles (PR 8a): only the Started rows, so the list never scans every version, and the profile id is all it reads.
+    index('routine_versions_started_idx').on(t.profileId).where(sql`${t.startedOn} IS NOT NULL`),
   ],
 )
 

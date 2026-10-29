@@ -8,7 +8,7 @@ import { MemoryPushSender } from '../../providers/push/memory.push'
 import { type PushMessage, PushUnavailableError } from '../../providers/push/push.provider'
 import { FakeNotificationSettingsRepository } from './notification-settings.repository.fake'
 import { REJECTED_PHOTO_REASONS } from '../../providers/perfect-corp/perfect-corp.provider'
-import { checkPushReceiptsSpec, sendPushSpec } from './notifications.job-specs'
+import { checkPushReceiptsSpec, type PushNotificationMessage, sendPushSpec } from './notifications.job-specs'
 import { NotificationsService } from './notifications.service'
 import { FakePushTokensRepository } from './push-tokens.repository.fake'
 
@@ -37,7 +37,7 @@ const ADA = actor('user-ada', 'profile-ada-1')
 const ADA_SECOND_PROFILE = actor('user-ada', 'profile-ada-2')
 const BOB = actor('user-bob', 'profile-bob-1')
 
-type SendPushBody = z.infer<typeof sendPushSpec.schema>
+type SendPushBody = PushNotificationMessage
 type CheckReceiptsBody = z.infer<typeof checkPushReceiptsSpec.schema>
 
 const finished = (over: Record<string, unknown> = {}) =>

@@ -3,7 +3,7 @@ import { type Actor, runAs } from '../../lib/context'
 import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryPushSender } from '../../providers/push/memory.push'
 import type { Frequency, RoutineStep } from '../catalog/catalog.vocabulary'
-import { sendPushSpec } from '../notifications/notifications.job-specs'
+import { type PushNotificationMessage, sendPushSpec } from '../notifications/notifications.job-specs'
 import { FakeNotificationSettingsRepository } from '../notifications/notification-settings.repository.fake'
 import { NotificationsService } from '../notifications/notifications.service'
 import { FakePushTokensRepository } from '../notifications/push-tokens.repository.fake'
@@ -162,6 +162,7 @@ beforeEach(() => {
     users: { get: async () => { throw new Error('not read') } } as unknown as Pick<UsersService, 'get'>,
     profiles: { find: async () => null } as unknown as Pick<ProfilesService, 'find'>,
     whatsappEnabled: false,
+    inbox: { write: async () => ({ id: 'unused', created: true }) },
   })
   notifications = new NotificationsService({ pushTokens, settings: notificationSettings, push, jobs, reminders, deviceIdKey: DEVICE_KEY, now: () => utc(0) })
   plans = new Map()
@@ -171,7 +172,7 @@ beforeEach(() => {
   service = new ReminderSendsService({
     settings,
     sends,
-    checkIns: { missedStreak: (profileId: string, today: string) => missedStreak(profileId, today) },
+    checkIns: { missedStreak: (profileId: string, today: string) => missedStreak(profileId, today), checkedTimes: async () => [] },
     channel: { missedDaysChannelFor: async (profileId: string) => channels.get(profileId) ?? 'push' },
     routine: {
       reminderPlanFor: async (profileId: string) => {
@@ -180,6 +181,9 @@ beforeEach(() => {
       },
     },
     notifications,
+    // This file pins the pushes alone: the inbox rows and the pause check-in push are pinned in reminders.sends.service.inbox.test.ts.
+    inbox: { write: async () => ({ id: 'unused', created: true }) },
+    skinCare: { checkInsDue: async () => [] },
   })
 })
 
@@ -212,7 +216,7 @@ const amara = async (patch: Parameters<FakeRemindersRepository['upsert']>[1] = {
 const drain = async () => {
   const pending = jobs.enqueued.slice(delivered)
   delivered = jobs.enqueued.length
-  for (const { job, body } of pending) if (job === 'send-push') await runAs({ kind: 'system', job: 'send-push' }, () => notifications.deliver(sendPushSpec.schema.parse(body)))
+  for (const { job, body } of pending) if (job === 'send-push') await runAs({ kind: 'system', job: 'send-push' }, () => notifications.deliver(sendPushSpec.schema.parse(body) as PushNotificationMessage))
 }
 /** One run of the job, and then the queue it filled delivered. Returns how many reminders the run enqueued. */
 const sendDue = async (now: Date) => {
@@ -1098,6 +1102,8 @@ describe('ReminderSendsService.sendDue: the missed-days nudge', () => {
       repository: new FakeRoutineCheckInsRepository(),
       versions: { current: async (profileId: string) => (plans.has(profileId) ? { startedOn: new Date(`${plans.get(profileId)!.dayOne}T00:00:00.000Z`) } : null) } as unknown as Pick<RoutinesRepository, 'current'>,
       reminders,
+      inbox: { write: async () => ({ id: 'unused', created: true }) },
+      routine: { reminderPlanFor: async () => null },
       now: () => checkInsClock,
     })
     missedStreak = (profileId, today) => checkIns.missedStreak(profileId, today)
@@ -1356,6 +1362,8 @@ describe('ReminderSendsService.sendDue: the daily push, the step-down alert and 
       repository: new FakeRoutineCheckInsRepository(),
       versions: { current: async (profileId: string) => (plans.has(profileId) ? { startedOn: new Date(`${plans.get(profileId)!.dayOne}T00:00:00.000Z`) } : null) } as unknown as Pick<RoutinesRepository, 'current'>,
       reminders,
+      inbox: { write: async () => ({ id: 'unused', created: true }) },
+      routine: { reminderPlanFor: async () => null },
       now: () => utc(12),
     })
     missedStreak = (profileId, today) => checkIns.missedStreak(profileId, today)
@@ -1435,6 +1443,8 @@ describe('ReminderSendsService.sendDue: the nudge counts from the day reminders 
       repository: new FakeRoutineCheckInsRepository(),
       versions: { current: async (profileId: string) => (plans.has(profileId) ? { startedOn: new Date(`${plans.get(profileId)!.dayOne}T00:00:00.000Z`) } : null) } as unknown as Pick<RoutinesRepository, 'current'>,
       reminders,
+      inbox: { write: async () => ({ id: 'unused', created: true }) },
+      routine: { reminderPlanFor: async () => null },
       now: () => clock,
     })
     missedStreak = (profileId, today) => checkIns.missedStreak(profileId, today)
@@ -1511,5 +1521,94 @@ describe('ReminderSendsService.sendDue: the nudge counts from the day reminders 
 
     expect(await sendDue(morning(0))).toBe(2)
     expect(queuedKinds().sort()).toEqual(['routine-reminder', 'step-down-alert'])
+  })
+})
+
+// The consumer of the cron's profile message (spec #233, PR 8a): one profile's share of sendDue, by the same code, for the slot the message carries.
+describe('ReminderSendsService.sendForProfile', () => {
+  const AMARA_ID = 'profile-amara-1'
+
+  it('sends the profile what sendDue would at the slot', async () => {
+    await amara()
+
+    const count = await service.sendForProfile(AMARA_ID, utc(6))
+    await drain()
+
+    expect(count).toBe(1)
+    expect(push.sent.map((message) => message.to)).toEqual([AMARA_TOKEN])
+  })
+
+  it('sends nothing for a profile with reminders off or with no settings row, and nothing for one with no time due', async () => {
+    await amara({ enabled: false })
+    expect(await service.sendForProfile(AMARA_ID, utc(6))).toBe(0)
+    expect(await service.sendForProfile('profile-nobody', utc(6))).toBe(0)
+    await remind(AMARA, { enabled: true, morning: '07:30', timeZone: LAGOS })
+    expect(await service.sendForProfile(AMARA_ID, utc(6))).toBe(0)
+    await drain()
+
+    expect(push.sent).toEqual([])
+  })
+
+  it('sends a slot once: a second message for it claims and sends nothing', async () => {
+    await amara()
+
+    expect(await service.sendForProfile(AMARA_ID, utc(6))).toBe(1)
+    expect(await service.sendForProfile(AMARA_ID, utc(6))).toBe(0)
+    await drain()
+
+    expect(push.sent).toHaveLength(1)
+  })
+
+  it('throws when the routine cannot be read, claiming nothing, so the retry sends the reminder', async () => {
+    await amara()
+    routineFailsFor = AMARA_ID
+
+    await expect(service.sendForProfile(AMARA_ID, utc(6))).rejects.toThrow('the routine could not be read')
+    routineFailsFor = null
+
+    expect(await service.sendForProfile(AMARA_ID, utc(6))).toBe(1)
+    await drain()
+    expect(push.sent).toHaveLength(1)
+  })
+
+  it('sends nothing for a slot more than 30 minutes old, logging it and sending nothing: a skipped slot is not made up', async () => {
+    await amara()
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+
+    expect(await service.sendForProfile(AMARA_ID, utc(6), new Date(utc(6).getTime() + 30 * MINUTE + 1))).toBe(0)
+    await drain()
+
+    expect(push.sent).toEqual([])
+    expect(logged).toHaveBeenCalledWith({ job: 'reminder-send', outcome: 'stale-slot', profileId: AMARA_ID })
+    // Nothing was claimed: the slot is still there for a message that is on time.
+    expect(await service.sendForProfile(AMARA_ID, utc(6), utc(6, 5))).toBe(1)
+  })
+
+  it('still sends a slot that is exactly 30 minutes old', async () => {
+    await amara()
+
+    expect(await service.sendForProfile(AMARA_ID, utc(6), new Date(utc(6).getTime() + 30 * MINUTE))).toBe(1)
+  })
+
+  it('still sends a slot that is ahead of the clock', async () => {
+    await amara()
+
+    expect(await service.sendForProfile(AMARA_ID, utc(6), utc(5))).toBe(1)
+  })
+
+  it('skips a profile whose stored zone is not one, logging its id, and answers 0 without throwing', async () => {
+    await amara({ timeZone: 'Not/AZone' })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await expect(service.sendForProfile(AMARA_ID, utc(6))).resolves.toBe(0)
+
+    expect(logged).toHaveBeenCalledWith({ job: 'reminder-send', outcome: 'profile-skipped', profileId: AMARA_ID })
+  })
+
+  it('does not hide another RangeError as a bad zone: an unreadable routine still throws', async () => {
+    await amara()
+    routineFailsFor = AMARA_ID
+
+    await expect(service.sendForProfile(AMARA_ID, utc(6))).rejects.toThrow('the routine could not be read')
   })
 })

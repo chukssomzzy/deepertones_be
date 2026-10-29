@@ -28,8 +28,8 @@ describe('the send-push job', () => {
     expect(sendPushSpec.retry).toEqual({ baseSeconds: 5, factor: 3, capSeconds: 135 })
   })
 
-  it('names the nine notification kinds', () => {
-    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-check-in-due', 'face-scan-needs-retake', 'face-scan-ready', 'missed-days-nudge', 'new-sign-in', 'routine-reminder', 'scan-finished', 'scan-needs-you', 'step-down-alert'])
+  it('names the ten notification kinds', () => {
+    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-check-in-due', 'face-scan-needs-retake', 'face-scan-ready', 'missed-days-nudge', 'new-sign-in', 'pause-check-in', 'routine-reminder', 'scan-finished', 'scan-needs-you', 'step-down-alert'])
   })
 
   it.each([
@@ -226,5 +226,32 @@ describe('the check-push-receipts job', () => {
 
     expect(checkPushReceiptsSpec.key(body)).toBe(checkPushReceiptsSpec.key({ receipts: [{ ...RECEIPT }] }))
     expect(checkPushReceiptsSpec.key(body)).not.toBe(checkPushReceiptsSpec.key({ receipts: [{ ...RECEIPT, ticketId: 'ticket-2' }] }))
+  })
+})
+
+// The reminder cron's profile message (spec #233, PR 8a) rides the send-push job but is not a notification.
+describe('the reminder-profile message of the send-push job', () => {
+  const MESSAGE = { kind: 'reminder-profile', profileId: 'profile-1', slot: Date.UTC(2030, 5, 15, 6, 45) }
+
+  it('is accepted, with the profile and the cron slot in epoch ms', () => {
+    expect(sendPushSpec.schema.safeParse(MESSAGE).success).toBe(true)
+  })
+
+  it.each([
+    ['no profile', { ...MESSAGE, profileId: undefined }],
+    ['no slot', { ...MESSAGE, slot: undefined }],
+    ['a fractional slot', { ...MESSAGE, slot: 1.5 }],
+  ])('rejects %s', (_name, body) => {
+    expect(sendPushSpec.schema.safeParse(body).success).toBe(false)
+  })
+
+  it('is one message for one profile and slot, and another for the next slot or another profile', () => {
+    expect(sendPushSpec.key(MESSAGE as never)).toBe(`reminder-profile:profile-1:${MESSAGE.slot}`)
+    expect(sendPushSpec.key({ ...MESSAGE, slot: MESSAGE.slot + 900_000 } as never)).not.toBe(sendPushSpec.key(MESSAGE as never))
+    expect(sendPushSpec.key({ ...MESSAGE, profileId: 'profile-2' } as never)).not.toBe(sendPushSpec.key(MESSAGE as never))
+  })
+
+  it('is not one of the notification kinds', () => {
+    expect(NOTIFICATION_KINDS).not.toContain('reminder-profile')
   })
 })

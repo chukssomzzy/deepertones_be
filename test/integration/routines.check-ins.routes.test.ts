@@ -1,12 +1,13 @@
 import { createExecutionContext } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
 import { hc } from 'hono/client'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import worker, { type AppType } from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import type { EmailAddress } from '../../src/lib/email-address'
 import { localDay } from '../../src/lib/local-day'
 import { TokenService } from '../../src/modules/auth/tokens.service'
+import { InboxService } from '../../src/modules/inbox/inbox.service'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { ProfilesService } from '../../src/modules/profiles/profiles.service'
 import { D1RoutineCheckInsRepository } from '../../src/modules/routines/routines.check-ins.repository'
@@ -326,5 +327,102 @@ describe('POST /api/v1/me/routine/check-ins', () => {
 
     expect(res.status).toBe(409)
     expect(await errorCodeOf(res)).toBe('ROUTINE_NOT_STARTED')
+  })
+})
+
+// The all-done row (spec #233, PR 8b). The check-in that completes the second half of a day (the day then holds both the morning and the evening) writes one inbox row,
+// `all-done:<day>`, kind 'all-done', for the day checked in (not necessarily today). Whichever half comes first, one half alone writes nothing, a repeat writes nothing more, and a row
+// that cannot be written never fails the check-in. Observed through GET /me/inbox, the read the app uses.
+type InboxRow = { id: string; kind: string; day: string; title: string; body: string; link: string; read: boolean }
+const inboxOf = async (bearer: string) => (await dataOf<{ items: InboxRow[] }>(await v1.me.inbox.$get({ query: { limit: '50' } as never }, { headers: headers(bearer) }))).items
+const allDone = async (bearer: string) => (await inboxOf(bearer)).filter((row) => row.kind === 'all-done')
+
+describe('POST /api/v1/me/routine/check-ins: the all-done row', () => {
+  it('writes one row, for the day, when the evening completes a day whose morning was done', async () => {
+    const account = await longStarted()
+    const today = localDay(new Date(), null)
+    await postCheckIn(account.accessToken, { day: today, time: 'morning' })
+    expect(await allDone(account.accessToken)).toEqual([])
+
+    expect((await postCheckIn(account.accessToken, { day: today, time: 'evening' })).status).toBe(200)
+
+    const rows = await allDone(account.accessToken)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: 'all-done', day: today, read: false })
+    expect(rows[0]!.title.length).toBeGreaterThan(0)
+    expect(rows[0]!.body.length).toBeGreaterThan(0)
+    expect(rows[0]!.link).toMatch(/^\/(?!\/)/)
+  })
+
+  it('writes it the same when the evening is checked in first and the morning completes the day', async () => {
+    const account = await longStarted()
+    const today = localDay(new Date(), null)
+    await postCheckIn(account.accessToken, { day: today, time: 'evening' })
+    expect(await allDone(account.accessToken)).toEqual([])
+
+    await postCheckIn(account.accessToken, { day: today, time: 'morning' })
+
+    expect((await allDone(account.accessToken)).map((row) => row.day)).toEqual([today])
+  })
+
+  it('writes it once: a repeat of the completing check-in, and of the first half, make no second row', async () => {
+    const account = await longStarted()
+    const today = localDay(new Date(), null)
+    await postCheckIn(account.accessToken, { day: today, time: 'morning' })
+    await postCheckIn(account.accessToken, { day: today, time: 'evening' })
+
+    await postCheckIn(account.accessToken, { day: today, time: 'evening' })
+    await postCheckIn(account.accessToken, { day: today, time: 'morning' })
+
+    expect(await allDone(account.accessToken)).toHaveLength(1)
+  })
+
+  it('writes nothing for one half alone, and nothing for a morning of one day and an evening of another', async () => {
+    const account = await longStarted()
+    const today = localDay(new Date(), null)
+    const yesterday = shift(today, -1)
+
+    await postCheckIn(account.accessToken, { day: today, time: 'morning' })
+    await postCheckIn(account.accessToken, { day: yesterday, time: 'evening' })
+
+    expect(await allDone(account.accessToken)).toEqual([])
+  })
+
+  it('writes a row for yesterday when the check-in that completes yesterday is made today', async () => {
+    const account = await longStarted()
+    const today = localDay(new Date(), null)
+    const yesterday = shift(today, -1)
+    await postCheckIn(account.accessToken, { day: yesterday, time: 'morning' })
+
+    await postCheckIn(account.accessToken, { day: yesterday, time: 'evening' })
+
+    expect((await allDone(account.accessToken)).map((row) => row.day)).toEqual([yesterday])
+  })
+
+  it('writes a row for each day that is completed', async () => {
+    const account = await longStarted()
+    const today = localDay(new Date(), null)
+    const yesterday = shift(today, -1)
+
+    for (const day of [yesterday, today]) for (const time of ['morning', 'evening'] as const) await postCheckIn(account.accessToken, { day, time })
+
+    expect((await allDone(account.accessToken)).map((row) => row.day).sort()).toEqual([yesterday, today])
+  })
+
+  it('still records the check-in, answers 200 and logs the failure by the profile id alone, when the row cannot be written', async () => {
+    const account = await longStarted()
+    const today = localDay(new Date(), null)
+    await postCheckIn(account.accessToken, { day: today, time: 'morning' })
+    vi.spyOn(InboxService.prototype, 'write').mockRejectedValue(new Error('the database is down for ExponentPushToken[abc]'))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    const res = await postCheckIn(account.accessToken, { day: today, time: 'evening' })
+
+    expect(res.status).toBe(200)
+    expect(await dataOf(res)).toEqual({ day: today, time: 'evening' })
+    expect(await storedFor(account.profileId)).toEqual([`${today} evening`, `${today} morning`])
+    expect(JSON.stringify(logged.mock.calls)).toContain(account.profileId)
+    expect(JSON.stringify(logged.mock.calls)).not.toContain('ExponentPushToken[abc]')
+    vi.restoreAllMocks()
   })
 })
