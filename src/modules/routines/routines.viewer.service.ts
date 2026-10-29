@@ -1,7 +1,7 @@
 import { describeError } from '../../jobs/safe-error'
 import { requireUser } from '../../lib/context'
 import { ConflictError, ForbiddenError, UnavailableError } from '../../lib/errors'
-import { localDay } from '../../lib/local-day'
+import { localDay, localHour, usableZone } from '../../lib/local-day'
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { ProductCatalogService } from '../catalog/catalog.service'
 import { rulesMatching } from '../catalog/catalog.rules'
@@ -9,25 +9,27 @@ import { ROUTINE_STEPS, type IngredientGroup, type ProductForm, type RoutineStep
 import type { CatalogWorkbookService } from '../catalog/catalog.workbook.service'
 import type { GoalsService } from '../goals/goals.service'
 import type { Goal } from '../goals/goals.vocabulary'
+import type { InboxService } from '../inbox/inbox.service'
 import type { RecommendationService } from '../recommendations/recommendations.service'
 import type { RemindersService } from '../reminders/reminders.service'
 import type { SafetyService } from '../safety/safety.service'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
-import type { SkinCareRoutine, SkinCareState } from '../skin-care/skin-care.types'
+import type { SkinCareRoutine, SkinCareState, StepPause } from '../skin-care/skin-care.types'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
 import { VerdictService } from '../verdicts/verdicts.service'
+import type { RoutineCheckInsRepository } from './routines.check-ins.repository'
 import type { RoutinesRepository, RoutineVersionRow } from './routines.repository'
 import type { RoutineService, RoutineView } from './routines.service'
 import { titleFor } from './routines.copy'
 import { commonlySoldAt, LOOK_FOR_PRODUCTS, whyFor } from './routines.look-for'
-import type { LookForResponse, RoutineResponse } from './routines.schemas'
+import type { LookForResponse, RoutineResponse, TodayResponse } from './routines.schemas'
 import type { StoredRoutineStep } from './routines.types'
-import { isSoldIn, stepDownsOf, stepTitleOf, toReminderPlan, toRoutineResponse, type ReminderPlan, type RoutineViewInput, type StepOverlay } from './routines.view'
+import { isSoldIn, stepDownsOf, stepTitleOf, toReminderPlan, toRoutineResponse, toTodayLists, weekOf, type ReminderPlan, type RoutineViewInput, type StepOverlay } from './routines.view'
 
 export type RoutineViewerServiceDeps = {
   routines: Pick<RoutineService, 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale'>
   goals: Pick<GoalsService, 'requireGoal'>
-  workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries' | 'guideFor'>
+  workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries' | 'guideFor' | 'weekCardFor'>
   catalog: Pick<ProductCatalogService, 'shelfFacts' | 'productSummaries'>
   shelf: Pick<ShelfService, 'activeEntriesFor'>
   recommendations: Pick<RecommendationService, 'shoppingFor' | 'candidatesFor'>
@@ -35,9 +37,13 @@ export type RoutineViewerServiceDeps = {
   safety: Pick<SafetyService, 'currentOrNull'>
   repository: Pick<RoutinesRepository, 'lastServedBefore' | 'markServed'>
   /** What the skin-care module says about a profile on its local day: the pauses and the hold that change what the routine shows. Required: a viewer without it would show every entry as active. */
-  skinCare: { stateFor(profileId: string, today: string): Promise<SkinCareState> }
-  /** Where the person's day begins: the state is asked for their local day. */
-  reminders: Pick<RemindersService, 'zoneFor'>
+  skinCare: { stateFor(profileId: string, today: string): Promise<SkinCareState>; checkInsDue(profileId: string, today: string): Promise<StepPause[]> }
+  /** Where the person's day begins (the state is asked for their local day), and whether reminders are on, for Today's banner (one read of both). */
+  reminders: Pick<RemindersService, 'zoneFor' | 'zoneAndEnabledFor'>
+  /** The day's check-ins, for Today's done flags. */
+  checkIns: Pick<RoutineCheckInsRepository, 'list'>
+  /** The unread count and newest rows Today carries. */
+  inbox: Pick<InboxService, 'summaryFor'>
   /** Tells whoever follows a profile's routine that it changed (`routine:<profileId>`). */
   events: ScanEvents
   /** Whether routines are switched on in this environment (the routine service's own switch): off, a build is never queued, and "find one sold here" answers as if it were. */
@@ -57,6 +63,9 @@ export class RoutineViewerService {
   /** The ingredient groups that make a product an active: the ones a pause is for. In vocabulary order, which is the order the ladder group is chosen in. */
   private static readonly ACTIVE_GROUPS = ['retinoid', 'exfoliating-acid', 'benzoyl-peroxide'] as const satisfies readonly IngredientGroup[]
 
+  /** Today's morning list runs until this hour of the person's local day, and its evening list from it: fixed, so the reminder times only decide when a push goes out. */
+  private static readonly EVENING_FROM_HOUR = 15
+
   private readonly routines: RoutineViewerServiceDeps['routines']
   private readonly goals: RoutineViewerServiceDeps['goals']
   private readonly workbook: RoutineViewerServiceDeps['workbook']
@@ -67,6 +76,8 @@ export class RoutineViewerService {
   private readonly repository: RoutineViewerServiceDeps['repository']
   private readonly skinCare: RoutineViewerServiceDeps['skinCare']
   private readonly reminders: RoutineViewerServiceDeps['reminders']
+  private readonly checkIns: RoutineViewerServiceDeps['checkIns']
+  private readonly inbox: RoutineViewerServiceDeps['inbox']
   private readonly events: ScanEvents
   private readonly enabled: boolean
   private readonly now: () => Date
@@ -82,6 +93,8 @@ export class RoutineViewerService {
     this.repository = deps.repository
     this.skinCare = deps.skinCare
     this.reminders = deps.reminders
+    this.checkIns = deps.checkIns
+    this.inbox = deps.inbox
     this.events = deps.events
     this.enabled = deps.enabled
     this.now = deps.now ?? (() => new Date())
@@ -205,6 +218,90 @@ export class RoutineViewerService {
               strength: candidate.strength,
               inYourRoutine: candidate.code === pick,
             })),
+    }
+  }
+
+  /**
+   * Today (screens 5.1A/B), computed for the caller's local day and asking for no build: the gates are `lookFor`'s (so nothing of skin-care is read for a guest, a profile with no goal or while the verdict is
+   * unavailable). The week and its reviewed card (for the current goal, and the step-down version while a dated step-down runs), the current half of the day (morning before 15:00 local, evening from
+   * then; fixed, never the reminder time) and the other, each with the entries due that day (a paused or held step, a rest day and an as-needed step are left out) and whether it was ticked off, the
+   * progress of each running step-down, the steps being brought back, the check-ins due, a hold, the reminders banner and the inbox summary. Before day 1 there is no week, card or entry, and the hold,
+   * the check-ins due, the banner and the inbox are still read, since a red flag can be logged before Start. Fails closed: when skin-care cannot be read, so does Today.
+   */
+  async today(): Promise<TodayResponse> {
+    const { profileId, goal } = await this.gatedWithGoal()
+    const now = this.now()
+    const settings = await this.reminders.zoneAndEnabledFor(profileId)
+    const zone = usableZone(now, settings.zone)
+    const day = localDay(now, zone)
+    const half: 'morning' | 'evening' = localHour(now, zone) < RoutineViewerService.EVENING_FROM_HOUR ? 'morning' : 'evening'
+    // The state settles the pauses first (it ends a ladder, replaces a pause whose product changed, pauses a step again), so the check-ins due are asked after it, never beside it.
+    const stateRead = this.skinCare.stateFor(profileId, day)
+    const [view, state, due, inbox] = await Promise.all([
+      this.routines.current(profileId),
+      stateRead,
+      stateRead.then(() => this.skinCare.checkInsDue(profileId, day)),
+      this.inboxSummary(profileId),
+    ])
+    const hold = state.held ? ({ title: 'See a professional' } as const) : null
+    const rest = { day, half, hold, remindersOff: !settings.enabled, inbox }
+    const nothing = { done: false, entries: [] }
+    if (view.status === 'pending') {
+      return { started: false, startsOn: null, week: null, card: null, current: nothing, other: nothing, allDone: false, stepDowns: [], checkInsDue: due.map(({ id, step, checkDay }) => ({ pauseId: id, step, title: null, checkDay })), bringingBack: [], paused: [], ...rest }
+    }
+    const { input, entries } = await this.aroundVersion(profileId, view.status, view.version, null, true)
+    const shown = await this.overlaid(profileId, input, entries, state)
+    const titles = new Map(shown.version.steps.map((step) => [step.step, stepTitleOf(step, shown)]))
+    const checkInsDue = due.map(({ id, step, checkDay }) => ({ pauseId: id, step, title: step === null ? null : (titles.get(step) ?? null), checkDay }))
+    const paused = state.pauses.flatMap(({ step, state: kind, pauseId, checkDay }) => {
+      const title = titles.get(step)
+      return kind === 'paused' && pauseId !== undefined && checkDay !== undefined && title !== undefined ? [{ pauseId, step, title, checkDay }] : []
+    })
+    const { startedOn } = view.version
+    const startsOn = startedOn === null ? null : startedOn.toISOString().slice(0, 10)
+    const week = startsOn === null ? null : weekOf(startsOn, day)
+    // Start makes tomorrow day 1: on the day of the tap the routine has started, and there is nothing to show yet.
+    if (startsOn === null || week === null) {
+      return { started: startsOn !== null, startsOn, week: null, card: null, current: nothing, other: nothing, allDone: false, stepDowns: [], checkInsDue, bringingBack: [], paused, ...rest }
+    }
+    const progress = stepDownsOf(shown, day).filter(({ running }) => running)
+    const [card, ticked] = await Promise.all([this.workbook.weekCardFor(week, goal, progress.length > 0), this.checkIns.list(profileId, day, day)])
+    const lists = toTodayLists(shown, day)
+    // A half with nothing due has nothing to tick off, so it counts as done: a day whose evening is all paused or resting can still be all done.
+    const doneIn = (time: 'morning' | 'evening') => lists[time].length === 0 || ticked.some((checkIn) => checkIn.time === time)
+    const other = half === 'morning' ? 'evening' : 'morning'
+    const bringingBack = shown.version.steps
+      .map((step) => ({ step, over: shown.overlay?.get(step) }))
+      .sort((a, b) => ROUTINE_STEPS.indexOf(a.step.step) - ROUTINE_STEPS.indexOf(b.step.step))
+      .flatMap(({ step, over }) => {
+        if (over?.status !== 'bringing-back' || over.rung === undefined || over.of === undefined) return []
+        const title = stepTitleOf(step, shown)
+        return [{ step: step.step, title, rung: over.rung, of: over.of, line: `Bringing back ${title}: step ${over.rung} of ${over.of}` }]
+      })
+    return {
+      started: true,
+      startsOn,
+      week,
+      card,
+      current: { done: doneIn(half), entries: lists[half] },
+      other: { done: doneIn(other), entries: lists[other] },
+      allDone: doneIn('morning') && doneIn('evening'),
+      stepDowns: progress.map(({ entryId, title, step, of }) => ({ entryId, title, step, of, line: `Step-down: step ${step} of ${of}` })),
+      checkInsDue,
+      bringingBack,
+      paused,
+      ...rest,
+    }
+  }
+
+  /** The inbox rows Today carries, field by field. Only the skin-care reads fail Today closed: an inbox that cannot be read is logged and shown empty. */
+  private async inboxSummary(profileId: string): Promise<TodayResponse['inbox']> {
+    try {
+      const { unread, latest } = await this.inbox.summaryFor(profileId)
+      return { unread, latest: latest.map(({ id, kind, day, title, body, link, read, createdAt }) => ({ id, kind, day, title, body, link, read, createdAt: createdAt.toISOString() })) }
+    } catch {
+      console.error({ outcome: 'today-inbox-failed', profileId })
+      return { unread: 0, latest: [] }
     }
   }
 
@@ -349,8 +446,8 @@ export class RoutineViewerService {
    * The input with what the skin-care state does to each step: a pause names a step and the key of its product (the catalog product it is, else the shelf entry's id), so a product
    * that has become the person's own entry of the same product is still the paused one. An open hold marks the steps whose product holds an active group. With no pause and no hold the input is returned as it is.
    */
-  private async overlaid(profileId: string, input: RoutineViewInput, entries: ShelfActiveEntry[]): Promise<RoutineViewInput> {
-    const state = await this.skinCare.stateFor(profileId, await this.todayOf(profileId))
+  private async overlaid(profileId: string, input: RoutineViewInput, entries: ShelfActiveEntry[], read?: SkinCareState): Promise<RoutineViewInput> {
+    const state = read ?? (await this.skinCare.stateFor(profileId, await this.todayOf(profileId)))
     if (state.pauses.length === 0 && !state.held) return input
     const { steps } = input.version
     const identities = steps.map((step) => RoutineViewerService.identityOf(step, entries, input.recommended))
@@ -362,15 +459,16 @@ export class RoutineViewerService {
       const pause = key === null ? undefined : state.pauses.find((paused) => paused.step === step.step && paused.productId === key)
       const held = (groups?.[at]?.length ?? 0) > 0
       // An open hold wins over a rung: nothing active comes back while it is open. A paused step stays paused (both are left out of the reminders).
-      if (pause && !(held && pause.state === 'bringing-back')) overlay.set(step, { status: pause.state, ...(pause.frequency === undefined ? {} : { frequency: pause.frequency }), ...(pause.anchor === undefined ? {} : { anchor: pause.anchor }) })
+      if (pause && !(held && pause.state === 'bringing-back')) overlay.set(step, { status: pause.state, ...(pause.frequency === undefined ? {} : { frequency: pause.frequency }), ...(pause.anchor === undefined ? {} : { anchor: pause.anchor }), ...(pause.rung === undefined ? {} : { rung: pause.rung }), ...(pause.of === undefined ? {} : { of: pause.of }) })
       else if (held) overlay.set(step, { status: 'held' })
     })
     return { ...input, overlay }
   }
 
-  /** The person's local day, 'YYYY-MM-DD': the stored zone's, or UTC with none. */
+  /** The person's local day, 'YYYY-MM-DD': the stored zone's, or UTC with none or with one Intl cannot use. */
   private async todayOf(profileId: string): Promise<string> {
-    return localDay(this.now(), await this.reminders.zoneFor(profileId))
+    const now = this.now()
+    return localDay(now, usableZone(now, await this.reminders.zoneFor(profileId)))
   }
 
   /** The catalog product a step's product is, and the formulation its ingredients are read from. Both null for an entry with no label, "use what you have", and a product that has left the shelf or the catalog. */

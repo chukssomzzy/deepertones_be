@@ -1,6 +1,7 @@
 import { abortAllDurableObjects, createExecutionContext } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
 import { hc } from 'hono/client'
+import { eq } from 'drizzle-orm'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import worker, { type AppType } from '../../src/index'
 import { createDb } from '../../src/lib/db'
@@ -14,6 +15,7 @@ import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.servic
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { ProfilesService } from '../../src/modules/profiles/profiles.service'
 import { D1RoutinesRepository, type RoutineVersionRow } from '../../src/modules/routines/routines.repository'
+import { D1SafetyRepository } from '../../src/modules/safety/safety.repository'
 import { profileProducts } from '../../src/modules/shelf/shelf.table'
 import { D1StepPausesRepository } from '../../src/modules/skin-care/skin-care.pauses.repository'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
@@ -23,7 +25,7 @@ import { MemoryEmailSender } from '../../src/providers/email/memory.email'
 import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
-import { applied, code, responseRow, taperRow } from './admin.catalog.support'
+import { applied, code, responseRow, ruleRow, taperRow, word } from './admin.catalog.support'
 import { countryRow, putCountry, type RawWorkbook } from './catalog.workbook.support'
 
 // The skin-log and pause routes (spec #233, PR 4b) through the Worker's public surface: the real entrypoint and real local D1 under it, plain fetch (the typed client has no call
@@ -54,12 +56,24 @@ import { countryRow, putCountry, type RawWorkbook } from './catalog.workbook.sup
 //   A check day that has been reached cannot be made on the real clock the Worker runs on: a pause is made by a harm log (the real path) and its check day is then moved to today
 //   through the pauses repository, the same way the undo test below makes a pause of an earlier day.
 //
+// PR 6b-ii adds (assumed: the brief gives the shape; the wrapper names are the assumptions):
+//   POST /api/v1/me/skin-care/hold/close   { how: 'seen' | 'settled' }
+//        200 { closed: true, checkInsDue: [{ id, step, checkDay, ... }] }, the check-ins due on the day of the close (the held steps', each due today)
+//        400 VALIDATION_FAILED for any other body or none; 401 AUTH_REQUIRED and 403 SIGNUP_REQUIRED, both before the body is read; 404 HOLD_NOT_FOUND when the account has no open hold.
+//   A professional result (a log, or a check-in) opens the account's hold, writes the inbox row { kind: 'escalation', link: '/routine' }, and GET /api/v1/me/routine then marks the
+//   entries whose product holds an active ingredient `held` (the account's treatment is a retinoid here, through an approved ingredient rule with that group). After the close that
+//   entry is `paused`, due the same day, and Calmer the same day brings it back. A worse-after-pause answer, and a second pause of a step being brought back, mark the product as one
+//   the person reacts to: the only way to see that through the public surface is the safety store, read in the tests marked below.
+//
 // The worker runs on the real clock, so every day here hangs off one ANCHOR taken at load. A pause that must have been made on an earlier day is put in place through the
 // pauses repository (the only way to be a day late within a test); that one case is marked where it happens.
 
 const ORIGIN = 'http://deepertones.test'
 const SOURCE_URL = 'https://shop.example/product'
 const CLEAN = ['Aqua', 'Glycerin', 'Cetearyl Alcohol']
+// A treatment with this in its ingredients holds an active group (retinoid), so an open hold keeps it out; the acid is the rule it clashes with.
+const RETINOID_INGREDIENT = `${word('zq')} retinoidum`
+const ACID_INGREDIENT = `${word('zq')} acidum`
 const STEROID_TAPER = code('TPR-STEROID')
 const LIGHTENING_TAPER = code('TPR-LIGHTENING')
 
@@ -157,9 +171,9 @@ const noLabelOnShelf = async (account: Account): Promise<string> => {
 
 const quietOpsAlerts = () => new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: new MemoryJobQueue(), email: new MemoryEmailSender(), recipient: '', environment: 'test' })
 /** A product the catalog holds, researched and analysed, put on the account's shelf. Answers the shelf entry's id. */
-const onShelf = async (account: Account): Promise<string> => {
+const onShelf = async (account: Account, ingredients: string[] = CLEAN): Promise<string> => {
   const researcher = new MemoryProductResearcher()
-  researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+  researcher.respondWith(() => ({ found: true, ingredients, sourceUrl: SOURCE_URL }))
   const analyst = new MemoryProductAnalyst()
   analyst.analyseWith((input) =>
     input.flaggedFacts.map((fact) => ({ kind: fact.kind, severity: 'high', ingredients: [fact.ingredient], why: 'Flagged by the rules.', whoShouldTakeCare: 'Everyone.', traits: [], sources: fact.source === null ? [] : [fact.source] })),
@@ -194,6 +208,10 @@ beforeAll(async () => {
     const raw = workbook as unknown as RawWorkbook
     putCountry(raw, countryRow('NG'))
     workbook.tapers.rows.push(taperRow({ code: STEROID_TAPER, kind: 'steroid' }), taperRow({ code: LIGHTENING_TAPER, kind: 'lightening-agent' }))
+    workbook.ingredients.rows.push(
+      ruleRow({ name: RETINOID_INGREDIENT, kind: 'irritation', group: 'retinoid', clashes_with: 'exfoliating-acid' }),
+      ruleRow({ name: ACID_INGREDIENT, kind: 'irritation', group: 'exfoliating-acid', clashes_with: 'retinoid' }),
+    )
     workbook.responses.rows.push(
       responseRow({ outcome: 'paused', title: 'We paused your {step}', body: PAUSED_BODY, what_to_do_now: 'Skip anything that stings. Keep to a gentle cleanser and moisturiser.' }),
       responseRow({ outcome: 'nothing-to-pause', title: 'Nothing to pause yet', body: NOTHING_BODY, what_to_do_now: 'Keep sunscreen if it does not sting.' }),
@@ -249,9 +267,9 @@ const appendVersion = async (account: Account, over: Partial<RoutineVersionRow> 
 }
 
 /** An account whose routine, started three days ago, is its own cleanser, treatment and moisturiser (all plain products: no step is active) and no sunscreen. */
-const withRoutine = async (over: Partial<RoutineVersionRow> = {}, options: { steppingDown?: boolean; noLabelTreat?: boolean } = {}) => {
+const withRoutine = async (over: Partial<RoutineVersionRow> = {}, options: { steppingDown?: boolean; noLabelTreat?: boolean; retinoidTreat?: boolean } = {}) => {
   const account = await newAccount()
-  const entries = { cleanse: await onShelf(account), treat: options.noLabelTreat ? await noLabelOnShelf(account) : await onShelf(account), moisturise: await onShelf(account) }
+  const entries = { cleanse: await onShelf(account), treat: options.noLabelTreat ? await noLabelOnShelf(account) : await onShelf(account, options.retinoidTreat ? [...CLEAN, RETINOID_INGREDIENT] : CLEAN), moisturise: await onShelf(account) }
   // A steroid cream being stopped slowly: its step-down began three days ago and runs five weeks (the template's schedule), so one is running today.
   const stopped = options.steppingDown ? await onShelf(account) : null
   await appendVersion(account, {
@@ -287,6 +305,12 @@ const postCheckIn = (bearer: string | undefined, id: string, json?: unknown) =>
     headers: { ...headers(bearer), 'content-type': 'application/json' },
     ...(json === undefined ? {} : { body: JSON.stringify(json) }),
   })
+const postCloseHold = (bearer: string | undefined, json?: unknown) =>
+  fetchWorker(`${ORIGIN}/api/v1/me/skin-care/hold/close`, {
+    method: 'POST',
+    headers: { ...headers(bearer), 'content-type': 'application/json' },
+    ...(json === undefined ? {} : { body: JSON.stringify(json) }),
+  })
 const getRoutine = (bearer: string) => fetchWorker(`${ORIGIN}/api/v1/me/routine`, { headers: headers(bearer) })
 
 const STING = { noticing: ['stinging-or-burning'], where: ['cheeks'], howBad: 'mild' }
@@ -309,6 +333,7 @@ describe('who may use the skin-log and pause routes', () => {
     ['GET /me/skin-logs', (bearer) => getLogs(bearer)],
     ['POST /me/skin-care/pauses/{id}/undo', (bearer) => postUndo(bearer, crypto.randomUUID())],
     ['POST /me/skin-care/pauses/{id}/check-in', (bearer) => postCheckIn(bearer, crypto.randomUUID(), { answer: 'same' })],
+    ['POST /me/skin-care/hold/close', (bearer) => postCloseHold(bearer, { how: 'seen' })],
   ]
 
   it.each(calls)('%s answers 401 AUTH_REQUIRED with no session', async (_name, call) => {
@@ -840,5 +865,159 @@ describe('a step being brought back, and a harm log', () => {
     expect(undone.status).toBe(200)
     expect(await dataOf(undone)).toEqual({ id, state: 'bringing-back' })
     expect(await statusesOf(account)).toMatchObject({ treat: 'bringing-back' })
+  })
+})
+
+// --- the escalation hold (PR 6b-ii) ---
+
+type CloseResult = { closed: boolean; checkInsDue: { id: string; step: string; checkDay: string }[] }
+const SWELLING = { noticing: ['swelling'], howBad: 'noticeable' }
+/** An account whose treatment holds an active ingredient, sent to a professional by a real log (swelling is a red flag: it pauses nothing). */
+const sentToAProfessional = async () => {
+  const account = await withRoutine({}, { retinoidTreat: true })
+  const result = await dataOf<LogResult>(await postLog(account.accessToken, SWELLING))
+  expect(result.outcome).toEqual({ kind: 'professional', reason: 'swelling' })
+  return account
+}
+const ALL_ACTIVE = { cleanse: 'active', treat: 'active', moisturise: 'active', protect: 'active' }
+
+describe('who may close the hold, and what it refuses', () => {
+  it('answers 401 to a close with no session before it looks at the body, a bodiless one included', async () => {
+    expect((await postCloseHold(undefined)).status).toBe(401)
+    expect((await postCloseHold(undefined, { how: 'later' })).status).toBe(401)
+  })
+
+  it.each([[{}], [{ how: 'later' }], [undefined]])('answers 403 SIGNUP_REQUIRED to a guest closing with the body %j: the account is checked before the body is read', async (body) => {
+    const { accessToken } = await newGuest()
+
+    const res = await postCloseHold(accessToken, body)
+
+    expect(res.status).toBe(403)
+    expect(await errorCodeOf(res)).toBe('SIGNUP_REQUIRED')
+  })
+
+  it.each([[{}], [{ how: 'later' }], [{ how: 'SEEN' }], [{ how: null }], [undefined]])('answers 400 VALIDATION_FAILED for the body %j, and the hold stays open', async (body) => {
+    const account = await sentToAProfessional()
+
+    const res = await postCloseHold(account.accessToken, body)
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+    expect(await statusesOf(account)).toMatchObject({ treat: 'held' })
+    expect((await postCloseHold(account.accessToken, { how: 'seen' })).status).toBe(200)
+  })
+
+  it('answers 404 HOLD_NOT_FOUND to an account with no open hold', async () => {
+    const account = await withRoutine({}, { retinoidTreat: true })
+
+    const res = await postCloseHold(account.accessToken, { how: 'seen' })
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('HOLD_NOT_FOUND')
+  })
+
+  it('answers 404 HOLD_NOT_FOUND for another account\'s hold, and leaves it open', async () => {
+    const owner = await sentToAProfessional()
+    const stranger = await newAccount()
+
+    const res = await postCloseHold(stranger.accessToken, { how: 'seen' })
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('HOLD_NOT_FOUND')
+    expect(await statusesOf(owner)).toMatchObject({ treat: 'held' })
+  })
+})
+
+describe('a professional result and the hold it opens', () => {
+  it('keeps the active step out of the routine as held, the others carrying on, and tells the inbox', async () => {
+    const account = await withRoutine({}, { retinoidTreat: true })
+    expect(await statusesOf(account)).toEqual(ALL_ACTIVE)
+
+    await dataOf<LogResult>(await postLog(account.accessToken, SWELLING))
+
+    expect(await statusesOf(account)).toEqual({ cleanse: 'active', treat: 'held', moisturise: 'active', protect: 'active' })
+    const inbox = await dataOf<{ items: { kind: string; link: string; key?: string }[] }>(await fetchWorker(`${ORIGIN}/api/v1/me/inbox`, { headers: headers(account.accessToken) }))
+    expect(inbox.items.filter((item) => item.kind === 'escalation')).toEqual([expect.objectContaining({ kind: 'escalation', link: '/routine' })])
+  })
+})
+
+describe('POST /api/v1/me/skin-care/hold/close', () => {
+  it('closes the hold: the held step is shown held before and paused after, due the same day, and Calmer that day brings it back', async () => {
+    const account = await sentToAProfessional()
+    expect(await statusesOf(account)).toEqual({ cleanse: 'active', treat: 'held', moisturise: 'active', protect: 'active' })
+
+    const res = await postCloseHold(account.accessToken, { how: 'seen' })
+
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { success: true; status: 200; message: string; data: CloseResult }
+    expect(body).toMatchObject({ success: true, status: 200, message: expect.any(String) })
+    expect(body.data).toEqual({ closed: true, checkInsDue: [expect.objectContaining({ id: expect.any(String), step: 'treat', checkDay: utcDay(ANCHOR) })] })
+    expect(await statusesOf(account)).toEqual({ cleanse: 'active', treat: 'paused', moisturise: 'active', protect: 'active' })
+
+    const [due] = body.data.checkInsDue
+    expect(await pausesStore.find(account.profileId, due!.id)).toMatchObject({ state: 'paused', checkDay: utcDay(ANCHOR), sourceLogId: null })
+    expect((await answer(account, due!.id, 'calmer')).pause).toEqual({ id: due!.id, step: 'treat', state: 'bringing-back', checkDay: null })
+    expect(await statusesOf(account)).toEqual({ cleanse: 'active', treat: 'bringing-back', moisturise: 'active', protect: 'active' })
+  })
+
+  it('closes the hold as settled too, and the second close is 404 HOLD_NOT_FOUND', async () => {
+    const account = await sentToAProfessional()
+
+    const settled = await postCloseHold(account.accessToken, { how: 'settled' })
+    const again = await postCloseHold(account.accessToken, { how: 'seen' })
+
+    expect(settled.status).toBe(200)
+    expect(await dataOf(settled)).toMatchObject({ closed: true })
+    expect(again.status).toBe(404)
+    expect(await errorCodeOf(again)).toBe('HOLD_NOT_FOUND')
+  })
+
+  it('does not touch another account\'s routine', async () => {
+    const sent = await sentToAProfessional()
+    const other = await sentToAProfessional()
+
+    await postCloseHold(sent.accessToken, { how: 'seen' })
+
+    expect(await statusesOf(other)).toMatchObject({ treat: 'held' })
+  })
+})
+
+describe('a product that keeps reacting', () => {
+  // The mark is a source `skin-log` mention on the profile's current safety row; no route shows it, so these two read the safety store, the one place it can be seen.
+  const safetyRows = new D1SafetyRepository(db)
+  const markedProductIds = async (account: Account) => {
+    const current = await safetyRows.current(account.profileId)
+    return (await safetyRows.mentions(current!.id)).filter((mention) => mention.source === 'skin-log').map((mention) => mention.productId)
+  }
+  const catalogProductOf = async (shelfEntryId: string) => (await db.select().from(profileProducts).where(eq(profileProducts.id, shelfEntryId)))[0]!.productId
+
+  it('marks the product when the person answers Worse after its pause', async () => {
+    const { account, id } = await dueTreatment()
+    expect(await markedProductIds(account)).toEqual([])
+
+    await answer(account, id, 'worse')
+
+    expect(await markedProductIds(account)).toEqual([await catalogProductOf(account.entries.treat)])
+  })
+
+  it('marks nothing for one pause followed by Calmer, and the product when it is paused a second time', async () => {
+    const { account, id } = await dueTreatment()
+    await answer(account, id, 'calmer')
+    expect(await markedProductIds(account)).toEqual([])
+
+    await sting(account)
+
+    expect(await markedProductIds(account)).toEqual([await catalogProductOf(account.entries.treat)])
+  })
+
+  it('marks nothing when the answer is the third "about the same" in a row', async () => {
+    const { account, id } = await dueTreatment()
+    for (let round = 0; round < 3; round++) {
+      await makeDue(account, id)
+      await answer(account, id, 'same')
+    }
+
+    expect(await pausesStore.find(account.profileId, id)).toMatchObject({ state: 'escalated' })
+    expect(await markedProductIds(account)).toEqual([])
   })
 })
