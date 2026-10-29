@@ -323,3 +323,71 @@ describe('POST /api/v1/me/inbox/read', () => {
     expect(await errorCodeOf(withoutBody)).toBe('AUTH_REQUIRED')
   })
 })
+
+// POST /api/v1/me/inbox/{id}/read (spec #233, PR 8b): the tap on a push. The push carries `data.inboxId`, and the app posts it here. Unlike `POST /inbox/read { upTo }` it marks that one row
+// and nothing older. 200 for a row the caller holds (read again is 200 too), 401 AUTH_REQUIRED with no session, 403 SIGNUP_REQUIRED for a guest, 404 INBOX_ITEM_NOT_FOUND for an id that is
+// another profile's or nobody's (and that profile's row is left as it was). The typed client has no call for a route that did not exist, so these go by plain fetch. The body of a 200 is not pinned.
+const postTap = (bearer: string | undefined, id: string) => fetchWorker(`http://deepertones.test/api/v1/me/inbox/${encodeURIComponent(id)}/read`, { method: 'POST', headers: headers(bearer) })
+
+describe('POST /api/v1/me/inbox/{id}/read', () => {
+  it('marks that row read and no other: an older unread row stays unread, which is what sets it apart from marking up to a row', async () => {
+    const { accessToken, profileId } = await newVerified()
+    const older = await seed(profileId, 0)
+    const tapped = await seed(profileId, MINUTE)
+    const newer = await seed(profileId, 2 * MINUTE)
+
+    const res = await postTap(accessToken, tapped)
+
+    expect(res.status).toBe(200)
+    const page = await dataOf<Page>(await getInbox(accessToken))
+    expect(page.items.map((item) => [item.id, item.read])).toEqual([[newer, false], [tapped, true], [older, false]])
+  })
+
+  it('is idempotent: tapping the same push again is 200 and changes nothing', async () => {
+    const { accessToken, profileId } = await newVerified()
+    const tapped = await seed(profileId, 0)
+    await postTap(accessToken, tapped)
+
+    const again = await postTap(accessToken, tapped)
+
+    expect(again.status).toBe(200)
+    expect((await dataOf<Page>(await getInbox(accessToken))).items.map((item) => item.read)).toEqual([true])
+  })
+
+  it('answers 404 INBOX_ITEM_NOT_FOUND for another account\'s row, and leaves that row unread', async () => {
+    const mine = await newVerified()
+    const other = await newVerified()
+    const strangers = await seed(other.profileId, 0)
+
+    const res = await postTap(mine.accessToken, strangers)
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('INBOX_ITEM_NOT_FOUND')
+    expect((await dataOf<Page>(await getInbox(other.accessToken))).items.map((item) => item.read)).toEqual([false])
+  })
+
+  it('answers 404 INBOX_ITEM_NOT_FOUND for an id nobody holds', async () => {
+    const { accessToken } = await newVerified()
+
+    const res = await postTap(accessToken, crypto.randomUUID())
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('INBOX_ITEM_NOT_FOUND')
+  })
+
+  it('answers 403 SIGNUP_REQUIRED to a guest', async () => {
+    const { accessToken } = await newGuest()
+
+    const res = await postTap(accessToken, crypto.randomUUID())
+
+    expect(res.status).toBe(403)
+    expect(await errorCodeOf(res)).toBe('SIGNUP_REQUIRED')
+  })
+
+  it('answers 401 AUTH_REQUIRED without a bearer token', async () => {
+    const res = await postTap(undefined, crypto.randomUUID())
+
+    expect(res.status).toBe(401)
+    expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+  })
+})

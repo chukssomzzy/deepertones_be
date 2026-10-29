@@ -5,6 +5,8 @@ export const InboxQuery = z.object({
   limit: z.coerce.number().int().min(1).max(50).optional().openapi({ description: 'How many items to answer, 1 to 50 (default 20). Anything else is 400 `VALIDATION_FAILED`.', example: 20 }),
 })
 
+export const InboxItemParams = z.object({ id: z.string().openapi({ description: 'The id of an inbox item, such as the `inboxId` a push carries.' }) })
+
 export const InboxResponse = z
   .object({
     items: z

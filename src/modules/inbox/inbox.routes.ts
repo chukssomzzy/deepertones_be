@@ -1,7 +1,7 @@
 import type { z } from '@hono/zod-openapi'
 import { defineRoute, errorResponses, jsonBody, ok, openapiApp, success } from '../../lib/openapi'
 import { signedIn } from '../../middleware/signed-in'
-import { InboxQuery, InboxResponse, MarkInboxReadBody, MarkInboxReadResponse } from './inbox.schemas'
+import { InboxItemParams, InboxQuery, InboxResponse, MarkInboxReadBody, MarkInboxReadResponse } from './inbox.schemas'
 import type { InboxItemView } from './inbox.service'
 
 const bearer = [{ bearerAuth: [] }]
@@ -41,6 +41,21 @@ const markInboxRead = defineRoute({
   responses: { 200: success(MarkInboxReadResponse, 'How many items are still unread'), ...errorResponses(400, 401, 403, 404) },
 })
 
+const markInboxItemRead = defineRoute({
+  method: 'post',
+  path: '/inbox/{id}/read',
+  operationId: 'markInboxItemRead',
+  tags: ['Inbox'],
+  summary: 'Mark one item as read',
+  description:
+    'The tap on a push: the push carries the item\'s id as `data.inboxId`. Marks that item read and no other, older ones included, and answers how many are still unread. It is idempotent, and an item already read keeps the time it was first read. ' +
+    'An item that is no item of the caller\'s is 404 `INBOX_ITEM_NOT_FOUND`. 401 without a session, 403 `SIGNUP_REQUIRED` for a guest.',
+  security: bearer,
+  request: { params: InboxItemParams },
+  responses: { 200: success(MarkInboxReadResponse, 'How many items are still unread'), ...errorResponses(401, 403, 404) },
+})
+
 export const inboxRoutes = openapiApp()
   .openapi(getInbox, async (c) => ok(c, toInboxResponse(await c.var.services.inbox.list(c.req.valid('query'))), 'Inbox'))
   .openapi(markInboxRead, async (c) => ok(c, await c.var.services.inbox.markRead(c.req.valid('json').upTo), 'Inbox marked read'))
+  .openapi(markInboxItemRead, async (c) => ok(c, await c.var.services.inbox.markOneRead(c.req.valid('param').id), 'Inbox item marked read'))

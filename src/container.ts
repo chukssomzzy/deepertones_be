@@ -324,6 +324,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         users: users(),
         profiles: profiles(),
         whatsappEnabled: parseOtpChannels(env.OTP_CHANNELS).includes('whatsapp'),
+        inbox: inbox(),
       }),
   )
 
@@ -467,6 +468,8 @@ export const buildContainer = (env: CloudflareBindings) => {
         repository: new D1RoutineCheckInsRepository(db()),
         versions: new D1RoutinesRepository(db()),
         reminders: reminders(),
+        inbox: inbox(),
+        routine: routineViewer(),
       }),
   )
 

@@ -162,6 +162,7 @@ beforeEach(() => {
     users: { get: async () => { throw new Error('not read') } } as unknown as Pick<UsersService, 'get'>,
     profiles: { find: async () => null } as unknown as Pick<ProfilesService, 'find'>,
     whatsappEnabled: false,
+    inbox: { write: async () => ({ id: 'unused', created: true }) },
   })
   notifications = new NotificationsService({ pushTokens, settings: notificationSettings, push, jobs, reminders, deviceIdKey: DEVICE_KEY, now: () => utc(0) })
   plans = new Map()
@@ -1098,6 +1099,8 @@ describe('ReminderSendsService.sendDue: the missed-days nudge', () => {
       repository: new FakeRoutineCheckInsRepository(),
       versions: { current: async (profileId: string) => (plans.has(profileId) ? { startedOn: new Date(`${plans.get(profileId)!.dayOne}T00:00:00.000Z`) } : null) } as unknown as Pick<RoutinesRepository, 'current'>,
       reminders,
+      inbox: { write: async () => ({ id: 'unused', created: true }) },
+      routine: { reminderPlanFor: async () => null },
       now: () => checkInsClock,
     })
     missedStreak = (profileId, today) => checkIns.missedStreak(profileId, today)
@@ -1356,6 +1359,8 @@ describe('ReminderSendsService.sendDue: the daily push, the step-down alert and 
       repository: new FakeRoutineCheckInsRepository(),
       versions: { current: async (profileId: string) => (plans.has(profileId) ? { startedOn: new Date(`${plans.get(profileId)!.dayOne}T00:00:00.000Z`) } : null) } as unknown as Pick<RoutinesRepository, 'current'>,
       reminders,
+      inbox: { write: async () => ({ id: 'unused', created: true }) },
+      routine: { reminderPlanFor: async () => null },
       now: () => utc(12),
     })
     missedStreak = (profileId, today) => checkIns.missedStreak(profileId, today)
@@ -1435,6 +1440,8 @@ describe('ReminderSendsService.sendDue: the nudge counts from the day reminders 
       repository: new FakeRoutineCheckInsRepository(),
       versions: { current: async (profileId: string) => (plans.has(profileId) ? { startedOn: new Date(`${plans.get(profileId)!.dayOne}T00:00:00.000Z`) } : null) } as unknown as Pick<RoutinesRepository, 'current'>,
       reminders,
+      inbox: { write: async () => ({ id: 'unused', created: true }) },
+      routine: { reminderPlanFor: async () => null },
       now: () => clock,
     })
     missedStreak = (profileId, today) => checkIns.missedStreak(profileId, today)

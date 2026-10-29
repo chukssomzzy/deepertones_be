@@ -1,7 +1,10 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Actor, runAs } from '../../lib/context'
 import { ConflictError, ForbiddenError, UnauthorizedError, ValidationError } from '../../lib/errors'
+import { FakeInboxRepository } from '../inbox/inbox.repository.fake'
+import { InboxService, type InboxWrite } from '../inbox/inbox.service'
 import type { RemindersService } from '../reminders/reminders.service'
+import type { ReminderRoutinePlan } from '../reminders/reminders.types'
 import { FakeRoutineCheckInsRepository } from './routines.check-ins.repository.fake'
 import { RoutineCheckInsService } from './routines.check-ins.service'
 import type { RoutineVersionRow } from './routines.repository'
@@ -64,6 +67,15 @@ let zone: string | null
 let checkIns: FakeRoutineCheckInsRepository
 let versions: FakeRoutinesRepository
 let service: RoutineCheckInsService
+/** The routine as the all-done rule reads it (reminderPlanFor): a morning and an evening of daily entries until a test says otherwise. Day 1 is 10 days before T0. */
+let routinePlan: Pick<ReminderRoutinePlan, 'dayOne' | 'morning' | 'evening'> | null
+const DAILY_PLAN: NonNullable<typeof routinePlan> = {
+  dayOne: '2030-06-05',
+  morning: [{ step: 'cleanse', title: 'Cleanser', frequency: 'am' }],
+  evening: [{ step: 'cleanse', title: 'Cleanser', frequency: 'pm' }],
+}
+/** A no-op inbox for the tests that are not about the all-done row. */
+const noInbox = { write: async () => ({ id: 'unused', created: true }) }
 
 const setClock = (offsetMs: number) => {
   clock = new Date(T0.getTime() + offsetMs)
@@ -72,12 +84,15 @@ const setClock = (offsetMs: number) => {
 beforeEach(() => {
   clock = T0
   zone = null
+  routinePlan = DAILY_PLAN
   checkIns = new FakeRoutineCheckInsRepository()
   versions = new FakeRoutinesRepository()
   service = new RoutineCheckInsService({
     repository: checkIns,
     versions,
     reminders: { zoneFor: async () => zone } satisfies Pick<RemindersService, 'zoneFor'>,
+    inbox: noInbox,
+    routine: { reminderPlanFor: async () => routinePlan },
     now: () => clock,
   })
 })
@@ -536,5 +551,215 @@ describe('RoutineCheckInsService.missedStreak', () => {
 
     expect(inLagos).toEqual({ days: 3, since: day(0) })
     expect(inKiritimati).toEqual(inLagos)
+  })
+})
+
+// The all-done row (spec #233, PR 8b). The check-in that makes a day hold both its morning and its evening writes one inbox row, key `all-done:<day>`, kind 'all-done', for the day checked in
+// (so yesterday's, when yesterday is what is checked in). One half alone writes nothing; neither does a repeat. A row that cannot be written is logged by the profile id alone and never fails the
+// check-in.
+//
+// THE CONTRACT THIS FILE PINS (assumed: the brief names the key and the behaviour, not the constructor):
+//   new RoutineCheckInsService({ ..., inbox })   inbox: Pick<InboxService, 'write'>   the test hands it a recorder around the real InboxService over its real fake
+describe('RoutineCheckInsService.checkIn: the all-done row', () => {
+  let inbox: InboxService
+  let attempted: InboxWrite[]
+  let inboxFails: boolean
+
+  beforeEach(async () => {
+    inboxFails = false
+    attempted = []
+    inbox = new InboxService({ repository: new FakeInboxRepository(), now: () => clock })
+    service = new RoutineCheckInsService({
+      repository: checkIns,
+      versions,
+      reminders: { zoneFor: async () => zone } satisfies Pick<RemindersService, 'zoneFor'>,
+      routine: { reminderPlanFor: async () => routinePlan },
+      now: () => clock,
+      inbox: {
+        write: async (input: InboxWrite) => {
+          attempted.push(input)
+          if (inboxFails) throw new Error('the inbox is down for ExponentPushToken[abc] All done')
+          return inbox.write(input)
+        },
+      },
+    })
+    await startedRoutine(AMARA, -3)
+  })
+
+  const keys = () => attempted.map(({ key }) => key)
+  const rows = (who: Actor = AMARA_ACTOR) => runAs(who, async () => (await inbox.list({ limit: 50 })).items)
+
+  it('writes one row, for the day, with the check-in that completes it, the evening after the morning', async () => {
+    await checkIn(day(0), 'morning')
+    expect(keys()).toEqual([])
+
+    await checkIn(day(0), 'evening')
+
+    expect(keys()).toEqual([`all-done:${day(0)}`])
+    expect(attempted[0]).toMatchObject({ profileId: AMARA, kind: 'all-done', day: day(0) })
+    expect(attempted[0]!.title.length).toBeGreaterThan(0)
+    expect(attempted[0]!.body.length).toBeGreaterThan(0)
+    expect(attempted[0]!.link).toMatch(/^\/(?!\/)/)
+    expect(await rows()).toHaveLength(1)
+  })
+
+  it('writes it the same when the morning completes a day whose evening was done first', async () => {
+    await checkIn(day(0), 'evening')
+    expect(keys()).toEqual([])
+
+    await checkIn(day(0), 'morning')
+
+    expect(keys()).toEqual([`all-done:${day(0)}`])
+  })
+
+  it('writes a row only for a day that holds both halves: a day with an evening alone gets none', async () => {
+    await checkIn(day(0), 'morning')
+    setClock(DAY)
+    await checkIn(day(0), 'evening')
+    await checkIn(day(1), 'evening')
+
+    // day(0) holds both (its evening was made late, the next day); day(1) holds an evening alone.
+    expect(keys()).toEqual([`all-done:${day(0)}`])
+  })
+
+  it('writes the row for yesterday when yesterday is what the check-in is for', async () => {
+    setClock(DAY)
+    await checkIn(day(0), 'morning')
+
+    await checkIn(day(0), 'evening')
+
+    expect((await rows()).map((row) => row.day)).toEqual([day(0)])
+  })
+
+  it('writes it once: a repeat of either check-in makes no second row', async () => {
+    await checkIn(day(0), 'morning')
+    await checkIn(day(0), 'evening')
+
+    await checkIn(day(0), 'evening')
+    await checkIn(day(0), 'morning')
+
+    expect([...new Set(keys())]).toEqual([`all-done:${day(0)}`])
+    expect(await rows()).toHaveLength(1)
+  })
+
+  it('writes the row into the profile that checked in and no other', async () => {
+    await startedRoutine(TOLU, -3)
+    await checkIn(day(0), 'morning', TOLU_ACTOR)
+
+    await checkIn(day(0), 'morning')
+    await checkIn(day(0), 'evening')
+
+    expect(await rows(AMARA_ACTOR)).toHaveLength(1)
+    expect(await rows(TOLU_ACTOR)).toEqual([])
+  })
+
+  it('writes nothing for a check-in that is refused', async () => {
+    await checkIn(day(0), 'morning')
+
+    await errorOf(checkIn(day(-9), 'evening'))
+
+    expect(keys()).toEqual([])
+    expect(await stored()).toEqual([`${day(0)} morning`])
+  })
+
+  it('records the check-in, answers it and logs the failure by the profile id alone, when the row cannot be written', async () => {
+    await checkIn(day(0), 'morning')
+    inboxFails = true
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await expect(checkIn(day(0), 'evening')).resolves.toEqual({ day: day(0), time: 'evening' })
+
+    expect(await stored()).toEqual([`${day(0)} evening`, `${day(0)} morning`])
+    const text = JSON.stringify(logged.mock.calls)
+    expect(text).toContain(AMARA)
+    expect(text).not.toContain('ExponentPushToken')
+    expect(text).not.toContain('All done')
+    vi.restoreAllMocks()
+  })
+})
+
+// The all-done row when a half has nothing to do (spec #233, PR 8b, review). A half with no entries due that day counts as done: the row is written when every half that has due entries is
+// checked in and at least one half is checked in. The entries are read from the routine (reminderPlanFor): the morning lists every entry, the evening only those due on the day.
+describe('RoutineCheckInsService.checkIn: the all-done row when a half has nothing to do', () => {
+  let inbox: InboxService
+  let attempted: InboxWrite[]
+  const entry = (frequency: 'am' | 'pm' | 'alternate-days') => ({ step: 'treat' as const, title: 'Retinoid', frequency })
+
+  beforeEach(async () => {
+    attempted = []
+    inbox = new InboxService({ repository: new FakeInboxRepository(), now: () => clock })
+    service = new RoutineCheckInsService({
+      repository: checkIns,
+      versions,
+      reminders: { zoneFor: async () => zone } satisfies Pick<RemindersService, 'zoneFor'>,
+      routine: { reminderPlanFor: async () => routinePlan },
+      now: () => clock,
+      inbox: {
+        write: async (input: InboxWrite) => {
+          attempted.push(input)
+          return inbox.write(input)
+        },
+      },
+    })
+    await startedRoutine(AMARA, -3)
+  })
+
+  const keys = () => [...new Set(attempted.map(({ key }) => key))]
+  const rows = () => runAs(AMARA_ACTOR, async () => (await inbox.list({ limit: 50 })).items)
+
+  // Day 1 is 2030-06-05 (10 days before T0): an alternate-days entry counts from it, so it is due on even offsets. 2030-06-15 is offset 10 (due), 2030-06-14 offset 9 (a rest night).
+  it('writes one row for a rest night on which only the morning is checked in', async () => {
+    routinePlan = { ...DAILY_PLAN, evening: [entry('alternate-days')] }
+    setClock(-DAY)
+
+    await checkIn(day(-1), 'morning')
+
+    expect(keys()).toEqual([`all-done:${day(-1)}`])
+    expect(await rows()).toHaveLength(1)
+  })
+
+  it('writes one row for a day with no morning entries on which only the evening is checked in', async () => {
+    routinePlan = { ...DAILY_PLAN, morning: [] }
+
+    await checkIn(day(0), 'evening')
+
+    expect(keys()).toEqual([`all-done:${day(0)}`])
+  })
+
+  it('still needs both halves on a day on which both have entries due', async () => {
+    routinePlan = { ...DAILY_PLAN, evening: [entry('alternate-days')] }
+
+    await checkIn(day(0), 'morning')
+    expect(keys()).toEqual([])
+
+    await checkIn(day(0), 'evening')
+    expect(keys()).toEqual([`all-done:${day(0)}`])
+  })
+
+  it('asks for both halves when the routine cannot be read, and the check-in still stands', async () => {
+    const down = new Error('the routine could not be read')
+    service = new RoutineCheckInsService({
+      repository: checkIns,
+      versions,
+      reminders: { zoneFor: async () => zone } satisfies Pick<RemindersService, 'zoneFor'>,
+      routine: { reminderPlanFor: async () => Promise.reject(down) },
+      now: () => clock,
+      inbox: { write: async (input: InboxWrite) => (attempted.push(input), inbox.write(input)) },
+    })
+
+    await checkIn(day(0), 'morning')
+    expect(keys()).toEqual([])
+
+    await checkIn(day(0), 'evening')
+    expect(keys()).toEqual([`all-done:${day(0)}`])
+  })
+
+  it('writes one row, and only one, for a repeat of the morning when the evening lists nothing', async () => {
+    routinePlan = { ...DAILY_PLAN, evening: [] }
+
+    await checkIn(day(0), 'morning')
+    await checkIn(day(0), 'morning')
+
+    expect(await rows()).toHaveLength(1)
   })
 })
