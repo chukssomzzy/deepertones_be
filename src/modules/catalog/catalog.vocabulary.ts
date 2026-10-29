@@ -98,6 +98,7 @@ export const ESCALATION_REASONS = [
   'unchanged-after-checks',
   'harm-while-two-paused',
   'hard-to-ignore-during-step-down',
+  'about-a-product',
 ] as const
 export type EscalationReason = (typeof ESCALATION_REASONS)[number]
 

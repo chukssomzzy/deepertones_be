@@ -53,12 +53,12 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
     expect(Object.keys(body.data.workbook as object).sort()).toEqual([...TABS].sort())
   })
 
-  it('is catalog version 1, served under the current contract version 2.3.0 (the migration stamped the version it seeded 1.0.0, which the export does not read)', async () => {
+  it('is catalog version 1, served under the current contract version 2.4.0 (the migration stamped the version it seeded 1.0.0, which the export does not read)', async () => {
     const live = await exportLive()
 
     expect(live.catalogVersion).toBe(1)
     expect(live.contractVersion).toBe(CONTRACT_VERSION)
-    expect(CONTRACT_VERSION).toBe('2.3.0')
+    expect(CONTRACT_VERSION).toBe('2.4.0')
     expect(await rulesVersion()).toBe(REFERENCE_VERSION)
   })
 
@@ -98,17 +98,21 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
         clashes_with: null,
         audited_by: null,
         audited_on: null,
+        // A rule stored before contract 2.4.0 has no reviewer role: the export gives the empty cell, so the team writes one before the first 2.4.0 import.
+        reviewer_role: null,
       })
     }
   })
 
-  it('serves a workbook that fails the contract it declares on nothing but the rows the team has yet to write for five tabs, and an import of it unedited is refused for that', async () => {
+  it('serves a workbook that fails the contract it declares on nothing but what the team has yet to write (the rows five tabs need, and the reviewer_role of every seeded rule), and an import of it unedited is refused for that', async () => {
     // Loaded here, not at the top: the schema module is renamed in the change this one builds on, and a missing module should fail this test alone.
     const { validateWorkbook } = await import('../../src/modules/catalog/catalog.workbook.schema')
     const live = await exportLive()
     const missing = [
       { tab: 'escalations', row: 1, column: 'reason', rule: 'ESCALATION_MISSING' },
       { tab: 'guides', row: 1, column: 'step', rule: 'GUIDE_BASE_MISSING' },
+      // Every seeded rule is approved and none has a reviewer role, in the order of the export (row 1 is the header row).
+      ...REFERENCE.map((_, index) => ({ tab: 'ingredients', row: index + 2, column: 'reviewer_role', rule: 'REQUIRED_WHEN_APPROVED' })),
       { tab: 'reintroductions', row: 1, column: 'group', rule: 'REINTRO_DEFAULT_MISSING' },
       { tab: 'responses', row: 1, column: 'outcome', rule: 'RESPONSE_MISSING' },
       { tab: 'weeks', row: 1, column: 'band', rule: 'WEEK_BASE_MISSING' },
@@ -148,9 +152,9 @@ describe('GET /api/v1/admin/catalog/export after an upload', () => {
   })
 
   it('gives back a claim word, a taper and a rule\'s group and clashes_with as they were uploaded, the schedule written one way whatever way it was typed', async () => {
-    const claim = claimWordRow({ audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
+    const claim = claimWordRow({ source_url: 'https://example.com/why-this-is-flagged', reviewer_role: 'a pharmacist', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
     const taper = taperRow({ kind: 'lightening-agent', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
-    const [one, other] = [ruleRow({ group: 'retinoid', clashes_with: 'exfoliating-acid' }), ruleRow({ group: 'exfoliating-acid', clashes_with: 'retinoid' })]
+    const [one, other] = [ruleRow({ group: 'retinoid', clashes_with: 'exfoliating-acid', reviewer_role: 'a consultant dermatologist' }), ruleRow({ group: 'exfoliating-acid', clashes_with: 'retinoid', reviewer_role: 'a pharmacist' })]
 
     await applied((workbook) => {
       workbook.claimWords.rows.push({ ...claim })
@@ -199,7 +203,8 @@ describe('GET /api/v1/admin/catalog/export after an upload', () => {
     expect(live.reintroductions.rows.find((row) => row.group === null)).toEqual(baseReintroductionRows()[0])
     expect(live.reintroductions.rows).toHaveLength(2)
     expect(live.escalations.rows.find((row) => row.reason === 'near-eyes')).toEqual(escalations.find((row) => row.reason === 'near-eyes'))
-    expect(live.escalations.rows).toHaveLength(7)
+    expect(live.escalations.rows.find((row) => row.reason === 'about-a-product')).toEqual(escalations.find((row) => row.reason === 'about-a-product'))
+    expect(live.escalations.rows).toHaveLength(8)
     expect(live.responses.rows.find((row) => row.outcome === 'check-same')).toEqual(responses.find((row) => row.outcome === 'check-same'))
     expect(live.responses.rows).toHaveLength(9)
     expect(live.weeks.rows.find((row) => row.band === '3-4' && row.goal === 'glow')).toEqual(glow)

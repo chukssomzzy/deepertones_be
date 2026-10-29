@@ -101,7 +101,7 @@ const GUIDE_ROWS: RawRow[] = ['cleanse', 'treat', 'moisturise', 'protect'].map((
 // vocabularies, for the same reason; the texts are placeholders the eval never reads.
 const SIGNED = { status: 'approved', approved_by: 'Eval', approved_on: '2026-01-01', audited_by: null, audited_on: null }
 const LADDER_ROWS: RawRow[] = [{ group: null, schedule: '1: weekly; 2: back', ...SIGNED }]
-const ESCALATION_ROWS: RawRow[] = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'].map((reason) => ({
+const ESCALATION_ROWS: RawRow[] = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down', 'about-a-product'].map((reason) => ({
   reason,
   who_to_see: 'A doctor.',
   how_soon: 'Today.',

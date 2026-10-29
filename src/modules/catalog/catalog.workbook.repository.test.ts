@@ -18,4 +18,13 @@ describe('FakeCatalogWorkbookRepository before anything is published', () => {
 
     expect(await new FakeCatalogWorkbookRepository().liveRules()).toEqual({ version: REFERENCE_VERSION, entries: byCode })
   })
+
+  // The migrated database holds the seed with no reviewer role (the column is new in contract 2.4.0 and nobody has named a role for a seeded rule), and the verdict reads that as null.
+  it('reads every seeded rule with a reviewerRole of null, as the migrated database does, and has no claim word that could have one', async () => {
+    const reference = await new FakeCatalogWorkbookRepository().readVerdictReference()
+
+    expect(reference.rules.length).toBe(REFERENCE.length)
+    for (const rule of reference.rules) expect(rule, rule.code).toHaveProperty('reviewerRole', null)
+    expect(reference.claimWords).toEqual([])
+  })
 })

@@ -83,7 +83,7 @@ describe('the batch applyWorkbook sends', () => {
       // The four reviewed tabs, the same way: a week card is the widest row of them, and 35 of the 70 keys are written (more than a statement's 100 parameters) and 35 retired.
       reintroductions: [reintroductionRow({ group: null, auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') }), reintroductionRow({ group: 'retinoid' })],
       retiredReintroductions: [{ group: 'exfoliating-acid' }, { group: 'benzoyl-peroxide' }],
-      escalations: (['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'] as const).map((reason) => escalationRow({ reason, auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
+      escalations: (['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down', 'about-a-product'] as const).map((reason) => escalationRow({ reason, auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
       responses: (['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'] as const).map((outcome) => responseRow({ outcome, auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
       weeks: weekKeys.slice(0, 35).map(([band, goal, stepDown]) => weekRow({ band, goal, stepDown, auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
       retiredWeeks: weekKeys.slice(35).map(([band, goal, stepDown]) => ({ band, goal, stepDown })),

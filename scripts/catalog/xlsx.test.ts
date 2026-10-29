@@ -214,9 +214,17 @@ describe('readWorkbookFile: a round trip', () => {
         product({ code: 'PRD-DRAFT-SERUM', brand: 'Brand Two', name: 'Serum', status: 'draft', approved_by: null, approved_on: null, draft_cells: 'frequency=https://a.example/f' }),
       ],
       availability: [availability(), availability({ product_code: 'PRD-DRAFT-SERUM', price_min: 0, price_max: 0, where_sold: null, source_url: null })],
-      ingredients: [ingredient(), ingredient({ code: 'ING-ALCOHOL-DENAT-DRYING', name: 'alcohol denat', aliases: 'sd alcohol; denatured alcohol', kind: 'drying', source_url: 'https://a.example/rule', helps: 'hd_oiliness' })],
+      // The reviewer_role cells: a role on an approved rule, and an empty cell on a draft (which reads back as null).
+      ingredients: [
+        ingredient({ reviewer_role: 'a registered pharmacist' }),
+        ingredient({ code: 'ING-ALCOHOL-DENAT-DRYING', name: 'alcohol denat', aliases: 'sd alcohol; denatured alcohol', kind: 'drying', source_url: 'https://a.example/rule', helps: 'hd_oiliness' }),
+        ingredient({ code: 'ING-ZZ-DRAFT', name: 'zzyzx draftum', status: 'draft', approved_by: null, approved_on: null, reviewer_role: null }),
+      ],
       countries: [country(), country({ code: 'GH', currency: 'GHS', low_max: 40, mid_max: 120, status: 'retired' })],
-      claimWords: [claimWord(), claimWord({ code: 'CLM-FAIRNESS', phrase: 'skin fairness', status: 'retired' })],
+      claimWords: [
+        claimWord({ source_url: 'https://a.example/why-flagged', reviewer_role: 'a registered pharmacist' }),
+        claimWord({ code: 'CLM-FAIRNESS', phrase: 'skin fairness', status: 'retired', reviewer_role: null }),
+      ],
       tapers: [taper(), taper({ code: 'TPR-LIGHTENING-1', kind: 'lightening-agent', schedule: '1: am-pm; 2-3: am; 4: stop', audited_by: 'Nneka Audit', audited_on: day(-1) })],
       guides: [
         ...baseGuides(),
@@ -235,6 +243,9 @@ describe('readWorkbookFile: a round trip', () => {
     // toEqual treats a missing key and `undefined` as the same, so the nulls are checked on their own below.
     expect(read.workbook).toEqual(written)
     expect(read.catalogVersion).toBe(7)
+    // The new cells of contract 2.4.0, on their own: a role and a link read back as text, and an empty cell as null.
+    expect(read.workbook.ingredients.rows.map((row) => row.reviewer_role)).toEqual(['a registered pharmacist', 'a consultant dermatologist', null])
+    expect(read.workbook.claimWords.rows.map((row) => [row.source_url, row.reviewer_role])).toEqual([['https://a.example/why-flagged', 'a registered pharmacist'], [null, null]])
   })
 
   it('gives null, never undefined or an empty string, for an empty cell, and keeps every header as a key', async () => {
@@ -644,6 +655,26 @@ describe('readWorkbookFile: a file made before the contract bump', () => {
     for (const title of ['Reintroductions', 'Escalations', 'Responses', 'Weeks']) expect(outcome.message).not.toContain(title)
     if (outcome.message === '') expect(outcome.contractVersion).toBe('2.2.0')
     else expect(outcome.message).toContain('2.2.0')
+  })
+
+  it('reads a file exported at 2.3.0, which has all eleven tabs and none of the contract 2.4.0 columns, as a file of that contract, so the server can refuse it by its stamp', async () => {
+    const path = newPath()
+    const book = new ExcelJS.Workbook()
+    const newColumns: Partial<Record<keyof typeof HEADERS, string[]>> = { ingredients: ['reviewer_role'], claimWords: ['source_url', 'reviewer_role'] }
+    for (const [key, name] of Object.entries(TAB_NAMES)) {
+      const dropped = newColumns[key as keyof typeof HEADERS] ?? []
+      book.addWorksheet(name).addRow(HEADERS[key as keyof typeof HEADERS].filter((header) => !dropped.includes(header)))
+    }
+    const meta = book.addWorksheet('_meta')
+    meta.addRow(['catalogVersion', 7])
+    meta.addRow(['contractVersion', '2.3.0'])
+    await book.xlsx.writeFile(path)
+
+    const read = await readWorkbookFile(path)
+
+    expect(read.contractVersion).toBe('2.3.0')
+    expect(read.workbook.ingredients.headers).not.toContain('reviewer_role')
+    expect(read.workbook.claimWords.headers).toEqual(['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'])
   })
 
   it('still names a missing tab when the file has no contract stamp at all, since nothing says it was made for another contract', async () => {

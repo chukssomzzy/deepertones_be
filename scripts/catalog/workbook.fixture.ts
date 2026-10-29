@@ -15,9 +15,9 @@ type Row = RawWorkbook['products']['rows'][number]
 export const HEADERS = {
   products: ['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'key_ingredient', 'strength', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells'],
   availability: ['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url'],
-  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'reviewer_role', 'approved_on', 'audited_by', 'audited_on'],
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
-  claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  claimWords: ['code', 'phrase', 'claim', 'source_url', 'status', 'approved_by', 'reviewer_role', 'approved_on', 'audited_by', 'audited_on'],
   tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   guides: ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   reintroductions: ['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
@@ -71,6 +71,7 @@ export const ingredient = (over: Row = {}): Row => ({
   clashes_with: null,
   status: 'approved',
   approved_by: 'Dr A. Reviewer',
+  reviewer_role: 'a consultant dermatologist',
   approved_on: day(-3),
   audited_by: null,
   audited_on: null,
@@ -81,8 +82,10 @@ export const claimWord = (over: Row = {}): Row => ({
   code: 'CLM-WHITENING',
   phrase: 'whitening',
   claim: 'lightening',
+  source_url: null,
   status: 'approved',
   approved_by: 'Dr A. Reviewer',
+  reviewer_role: 'a consultant dermatologist',
   approved_on: day(-3),
   audited_by: null,
   audited_on: null,
@@ -123,7 +126,7 @@ export const guide = (over: Row = {}): Row => ({
 export const baseGuides = (): Row[] => ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => guide({ step }))
 
 /** The reasons an escalation row is written for, the outcomes a response row is, and the week bands: written out here and not read from the vocabularies. */
-export const ESCALATION_REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'] as const
+export const ESCALATION_REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down', 'about-a-product'] as const
 export const RESPONSE_OUTCOMES = ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'] as const
 export const WEEK_BANDS = ['1', '2', '3-4', '5-8', '9-12'] as const
 
@@ -190,7 +193,17 @@ export const baseWeeks = (): Row[] => WEEK_BANDS.map((band) => week({ band, titl
 
 export const country = (over: Row = {}): Row => ({ code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active', ...over })
 
-/** A workbook the real contract accepts: one valid row in each tab (and the rows the contract needs: four in Guides, the base row of each step; one default ladder; seven escalations, eight responses and five week cards), unless the rows of a tab are given. Every header is present. */
+/**
+ * Gives every approved rule and claim word of the workbook that has no reviewer_role the one the fixtures have. A workbook exported from a catalog stored before contract 2.4.0
+ * (the seeded rules, or a fake that starts as the migrated database does) holds rules with none, and the contract needs one of an approved row.
+ */
+export const withReviewerRoles = (workbook: RawWorkbook): void => {
+  for (const tab of [workbook.ingredients, workbook.claimWords]) {
+    for (const row of tab.rows) if (row.status === 'approved' && (row.reviewer_role ?? null) === null) row.reviewer_role = 'a consultant dermatologist'
+  }
+}
+
+/** A workbook the real contract accepts: one valid row in each tab (and the rows the contract needs: four in Guides, the base row of each step; one default ladder; eight escalations, nine responses and five week cards), unless the rows of a tab are given. Every header is present. */
 export const validWorkbook = (over: Partial<Record<Tab, Row[]>> = {}): RawWorkbook => ({
   products: { headers: [...HEADERS.products], rows: over.products ?? [product()] },
   availability: { headers: [...HEADERS.availability], rows: over.availability ?? [availability()] },

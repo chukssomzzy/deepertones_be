@@ -1,6 +1,6 @@
 # Catalog workbook contract
 
-Version 2.3.0. Fingerprint `e18f5eb3b236fc158535faf3621f7d6d72fbf5527ad1f9c8939629cba1de3423`.
+Version 2.4.0. Fingerprint `eb5d5d1bd931dc2f4f21f1bed12e60c81e3905a01155a56b2ee504660dda3005`.
 
 This document is written by `npm run catalog:contract-doc` from `src/modules/catalog/catalog.workbook.schema.ts`. Do not edit it by hand: change the
 contract, and run the command again.
@@ -95,6 +95,7 @@ The ingredient rules: a fact about an ingredient that every analysis of a produc
 | `clashes_with` | Optional | The groups that should not be used together with this rule's group, separated by ;. The relation goes both ways: if retinoid lists exfoliating-acid, a rule of the exfoliating-acid group lists retinoid. Needs a group on the rule. | One or more of, separated by semicolons: `mercury`, `steroid`, `lightening-agent`, `retinoid`, `exfoliating-acid`, `benzoyl-peroxide`. | `NOT_IN_VOCABULARY` |
 | `status` | Required | draft: still being worked on, and applies to nothing. approved: in force. retired: no longer in force; the row stays so its code is never reused. | One of: `draft`, `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
 | `approved_by` | Required when approved | Who approved this rule. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
+| `reviewer_role` | Required when approved | The role of the person who reviewed this rule, as the app shows it to users under "Reviewed by": for example "a consultant dermatologist". Never a name. Needed when the status is approved. | Text. Up to 80 characters. No links or markup. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` `HAS_LINK_OR_MARKUP` |
 | `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
 | `audited_by` | Optional | Who checked the approval afterwards. Optional, but given together with audited_on. | Text. Up to 80 characters. | `TOO_LONG` `AUDIT_INCOMPLETE` |
 | `audited_on` | Optional | The day of that check. Optional, but given together with audited_by. | A day written `YYYY-MM-DD`. | `BAD_DATE` `AUDIT_INCOMPLETE` |
@@ -132,8 +133,10 @@ Phrases that say a product is sold for lightening or bleaching. A product whose 
 | `code` | Required | Our own short code for the claim word, such as CLM-WHITENING. It never changes once the word is in the workbook. | Capital letters, digits and hyphens, 2 to 40 characters, starting with a letter or digit. Unique in the tab. | `REQUIRED` `BAD_CODE` `DUPLICATE_CODE` |
 | `phrase` | Required | The words, in lower case, as they appear in a product name: for example "whitening". | Text. Up to 60 characters. No links or markup. Lower case only. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `NOT_LOWER_CASE` |
 | `claim` | Required | What the phrase claims. Only lightening, for now. | One of: `lightening`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `source_url` | Optional | A link to the page behind the claim word. Optional. | An https link. | `NOT_HTTPS_URL` |
 | `status` | Required | approved: in force. retired: no longer in force; the row stays so its code is never reused. A claim word has no draft: leave a word you are unsure of out of the workbook. | One of: `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
 | `approved_by` | Required when approved | Who approved this claim word. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
+| `reviewer_role` | Required when approved | The role of the person who reviewed this claim word, as the app shows it to users under "Reviewed by": for example "a consultant dermatologist". Never a name. Needed when the status is approved. | Text. Up to 80 characters. No links or markup. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` `HAS_LINK_OR_MARKUP` |
 | `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
 | `audited_by` | Optional | Who checked the approval afterwards. Optional, but given together with audited_on. | Text. Up to 80 characters. | `TOO_LONG` `AUDIT_INCOMPLETE` |
 | `audited_on` | Optional | The day of that check. Optional, but given together with audited_by. | A day written `YYYY-MM-DD`. | `BAD_DATE` `AUDIT_INCOMPLETE` |
@@ -217,7 +220,7 @@ What the app tells a person when it sends them to a professional: who to see, ho
 
 | Column | Needed | What it holds | Format and accepted values | Problems it can raise |
 | --- | --- | --- | --- | --- |
-| `reason` | Required | Why the app sends the person to a professional. | One of: `pus-or-hot-patch`, `swelling`, `near-eyes`, `worse-after-pause`, `unchanged-after-checks`, `harm-while-two-paused`, `hard-to-ignore-during-step-down`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `reason` | Required | Why the app sends the person to a professional. | One of: `pus-or-hot-patch`, `swelling`, `near-eyes`, `worse-after-pause`, `unchanged-after-checks`, `harm-while-two-paused`, `hard-to-ignore-during-step-down`, `about-a-product`. | `REQUIRED` `NOT_IN_VOCABULARY` |
 | `who_to_see` | Required | The kind of professional to see, in plain words: for example "A doctor or a pharmacist." | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `ESCALATION_WORDING` |
 | `how_soon` | Required | How soon to be seen, in plain words: for example "Today, or within a day." | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `ESCALATION_WORDING` |
 | `what_to_tell_them` | Required | What the person should tell the professional, in plain words. | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `ESCALATION_WORDING` |
@@ -426,7 +429,7 @@ Used by: `Reintroductions.schedule`
 
 ### Escalation reasons
 
-`pus-or-hot-patch`, `swelling`, `near-eyes`, `worse-after-pause`, `unchanged-after-checks`, `harm-while-two-paused`, `hard-to-ignore-during-step-down`
+`pus-or-hot-patch`, `swelling`, `near-eyes`, `worse-after-pause`, `unchanged-after-checks`, `harm-while-two-paused`, `hard-to-ignore-during-step-down`, `about-a-product`
 
 The reasons the app sends a person to a professional. Each has exactly one approved row in the Escalations tab.
 
@@ -511,7 +514,7 @@ Used by: `Weeks.step_down`
 | `REINTRO_BACK_ONLY` | The ladder has no step before back. A ladder needs at least one step before back, since a product is never brought back at full strength at once: start with a rarer step such as weekly. |
 | `REINTRO_BACK_NOT_LAST` | A step whose frequency is back is followed by another step. Back ends the ladder, so it is the last step. |
 | `REINTRO_FREQUENCY_DECREASES` | A step uses the product less often than the step before it. A ladder only ever goes up: as-needed, then weekly, then alternate-days, then am or pm (the same strength), then am-pm, then back. The same frequency twice is fine. |
-| `ESCALATION_MISSING` | A reason has no approved escalation. Each of the reasons (pus-or-hot-patch, swelling, near-eyes, worse-after-pause, unchanged-after-checks, harm-while-two-paused, hard-to-ignore-during-step-down) needs exactly one approved row. A draft or retired row does not count. It is reported once, on the header row. |
+| `ESCALATION_MISSING` | A reason has no approved escalation. Each of the reasons (pus-or-hot-patch, swelling, near-eyes, worse-after-pause, unchanged-after-checks, harm-while-two-paused, hard-to-ignore-during-step-down, about-a-product) needs exactly one approved row. A draft or retired row does not count. It is reported once, on the header row. |
 | `ESCALATION_DUPLICATE` | Two rows of the Escalations tab are for the same reason. Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each. |
 | `ESCALATION_WORDING` | An escalation text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. Say what to do in plain words, without them. |
 | `RESPONSE_MISSING` | An outcome has no approved response. Each of the outcomes (paused, advice-tightness, advice-itching, advice-breakouts, expected-flare, check-calmer, check-same, check-worse, nothing-to-pause) needs exactly one approved row. A draft or retired row does not count. It is reported once, on the header row. |

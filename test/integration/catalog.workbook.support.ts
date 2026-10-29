@@ -1,4 +1,4 @@
-import { ADMIN_TOKEN, fetchWorker as fetchAdmin, withBaseGuides, withReviewedRows } from './admin.catalog.support'
+import { ADMIN_TOKEN, fetchWorker as fetchAdmin, withBaseGuides, withReviewedRows, withReviewerRoles } from './admin.catalog.support'
 
 // Shared by the integration tests that need a recommendation catalog in D1: they put it there the way the team does, through the admin import
 // endpoint (PR 3), as an export of what is live with their own rows added. Nothing writes a table directly. The endpoint, its header and the
@@ -81,6 +81,7 @@ export const applyCatalogChange = async (fetchWorker: Fetch, change: (workbook: 
   change(workbook)
   withBaseGuides(workbook)
   withReviewedRows(workbook)
+  withReviewerRoles(workbook)
   const form = new FormData()
   form.set('workbook', JSON.stringify(workbook))
   form.set('file', new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], 'catalog.xlsx', { type: XLSX_TYPE }))

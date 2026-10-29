@@ -393,6 +393,13 @@
       "when": 1793250273814,
       "tag": "0055_majestic_jubilee",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "6",
+      "when": 1793284934937,
+      "tag": "0056_wise_the_captain",
+      "breakpoints": true
     }
   ]
 }

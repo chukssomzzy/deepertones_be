@@ -28,10 +28,10 @@ export const EXPORT_URL = `${ORIGIN}/api/v1/admin/catalog/export`
 export const IMPORT_URL = `${ORIGIN}/api/v1/admin/catalog/import`
 
 /**
- * The contract version this checkout serves, written out: the version of the contract that adds the Reintroductions, Escalations, Responses and Weeks tabs. A literal, not read
- * from the code, so a bump has to be made here too.
+ * The contract version this checkout serves, written out: the version of the contract that adds reviewer_role to the Ingredients and Claim words tabs, source_url to Claim words and
+ * the about-a-product escalation. A literal, not read from the code, so a bump has to be made here too.
  */
-export const CONTRACT_VERSION = '2.3.0'
+export const CONTRACT_VERSION = '2.4.0'
 
 export const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -62,9 +62,9 @@ export const code = (prefix: string) => `${prefix}-${runSalt}-${next()}`
 export const HEADERS = {
   products: ['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'key_ingredient', 'strength', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells'],
   availability: ['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url'],
-  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'reviewer_role', 'approved_on', 'audited_by', 'audited_on'],
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
-  claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  claimWords: ['code', 'phrase', 'claim', 'source_url', 'status', 'approved_by', 'reviewer_role', 'approved_on', 'audited_by', 'audited_on'],
   tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   guides: ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   reintroductions: ['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
@@ -116,6 +116,9 @@ export const availabilityRow = (productCode: string, over: RawRow = {}): RawRow 
   ...over,
 })
 
+/** The role the app shows under "Reviewed by" for every rule and claim word here, unless a test says another: a role, never a name. */
+export const REVIEWER_ROLE = 'a consultant dermatologist'
+
 export const ruleRow = (over: RawRow = {}): RawRow => ({
   code: code('ING'),
   name: `${word('zq')} extractum`,
@@ -129,6 +132,7 @@ export const ruleRow = (over: RawRow = {}): RawRow => ({
   clashes_with: null,
   status: 'approved',
   approved_by: 'Dr A. Reviewer',
+  reviewer_role: REVIEWER_ROLE,
   approved_on: APPROVED_ON,
   audited_by: null,
   audited_on: null,
@@ -140,8 +144,10 @@ export const claimWordRow = (over: RawRow = {}): RawRow => ({
   code: code('CLM'),
   phrase: word('zqphrase'),
   claim: 'lightening',
+  source_url: null,
   status: 'approved',
   approved_by: 'Dr A. Reviewer',
+  reviewer_role: REVIEWER_ROLE,
   approved_on: APPROVED_ON,
   audited_by: null,
   audited_on: null,
@@ -199,7 +205,7 @@ export const withBaseGuides = (workbook: RawWorkbook): void => {
 }
 
 /** The reasons an escalation is written for, the outcomes a response answers and the week bands, written out and not read from the code. */
-export const REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'] as const
+export const REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down', 'about-a-product'] as const
 export const OUTCOMES = ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'] as const
 export const BANDS = ['1', '2', '3-4', '5-8', '9-12'] as const
 const signed = { status: 'approved', approved_by: 'Dr A. Reviewer', approved_on: APPROVED_ON, audited_by: null, audited_on: null }
@@ -253,6 +259,16 @@ export const withReviewedRows = (workbook: RawWorkbook): void => {
   missing(workbook.escalations, allEscalationRows(), (a, b) => a.reason === b.reason)
   missing(workbook.responses, allResponseRows(), (a, b) => a.outcome === b.outcome)
   missing(workbook.weeks, baseWeekRows(), (a, b) => a.band === b.band && (a.goal ?? null) === null && (a.step_down ?? 'no') === 'no')
+}
+
+/**
+ * Gives an approved rule or claim word that has no reviewer_role the one every row here has. The contract refuses an approved row without one, and the rules the migration seeded
+ * (and any row stored before contract 2.4.0) have none, so an upload that is about something else starts with this, as the team fills the role in before its first 2.4.0 import.
+ */
+export const withReviewerRoles = (workbook: RawWorkbook): void => {
+  for (const tab of [workbook.ingredients, workbook.claimWords]) {
+    for (const row of tab.rows) if (row.status === 'approved' && (row.reviewer_role ?? null) === null) row.reviewer_role = REVIEWER_ROLE
+  }
 }
 
 export const NIGERIA: RawRow = { code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active' }
@@ -385,19 +401,21 @@ export const without = (tab: RawTab, key: string, value: unknown) => {
 /**
  * Export, edit, import: the way the catalog is changed in life. Returns what was live before, and the reply. The base guide rows the contract needs are
  * added for a step that has none (`withBaseGuides`), unless the test says `baseGuides: false` because it is about them; the rows of the four reviewed tabs
- * likewise (`withReviewedRows`), unless it says `reviewedRows: false`.
+ * likewise (`withReviewedRows`), unless it says `reviewedRows: false`, and the reviewer_role of the approved rules and claim words that have none (`withReviewerRoles`), unless it says
+ * `reviewerRoles: false`.
  */
 export const upload = async (
   edit: (workbook: RawWorkbook) => void,
-  over: Partial<Omit<ImportInput, 'workbook' | 'baseVersion'>> & { baseVersion?: (live: number) => number; baseGuides?: boolean; reviewedRows?: boolean } = {},
+  over: Partial<Omit<ImportInput, 'workbook' | 'baseVersion'>> & { baseVersion?: (live: number) => number; baseGuides?: boolean; reviewedRows?: boolean; reviewerRoles?: boolean } = {},
 ) => {
   const before = await exportLive()
-  const { baseVersion, baseGuides, reviewedRows, ...rest } = over
+  const { baseVersion, baseGuides, reviewedRows, reviewerRoles, ...rest } = over
   const res = await importRaw({
     workbook: edited(before.workbook, (workbook) => {
       edit(workbook)
       if (baseGuides !== false) withBaseGuides(workbook)
       if (reviewedRows !== false) withReviewedRows(workbook)
+      if (reviewerRoles !== false) withReviewerRoles(workbook)
     }),
     baseVersion: baseVersion ? baseVersion(before.catalogVersion) : before.catalogVersion,
     ...rest,

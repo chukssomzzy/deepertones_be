@@ -42,7 +42,7 @@ import {
 // The HTTP shapes that carry a workbook (the raw tabs a request and the export hold) are zod schemas in catalog.workbook.schemas.ts; a tab or cell type changed here changes those too.
 
 /** Bumped when a tab, column, accepted value or rule changes, so a file written to an older contract is known to be. */
-export const CONTRACT_VERSION = '2.3.0'
+export const CONTRACT_VERSION = '2.4.0'
 
 /** What a spreadsheet library gives for a cell. */
 export type Cell = string | number | boolean | null
@@ -316,9 +316,20 @@ const RESPONSE_TEXT_LENGTH = 300
 const WEEK_TITLE_LENGTH = 60
 const WEEK_TEXT_LENGTH = 300
 
-// The sign-off columns are the same on every tab but Availability and Countries.
-const signOff = (what: string): ColumnDefinition[] => [
+// The role the app shows under "Reviewed by" next to a rule or a claim word the shelf verdict explains.
+const reviewerRoleColumn = (what: string): ColumnDefinition[] => [{
+  name: 'reviewer_role',
+  type: 'text',
+  required: 'when-approved',
+  maxLength: SIGNER_LENGTH,
+  plainText: true,
+  about: `The role of the person who reviewed this ${what}, as the app shows it to users under "Reviewed by": for example "a consultant dermatologist". Never a name. Needed when the status is approved.`,
+}]
+
+// The sign-off columns are the same on every tab but Availability and Countries. A tab the verdict explains with a reviewer's role has it right after approved_by.
+const signOff = (what: string, reviewerRole: ColumnDefinition[] = []): ColumnDefinition[] => [
   { name: 'approved_by', type: 'text', required: 'when-approved', maxLength: SIGNER_LENGTH, about: `Who approved this ${what}. Needed when the status is approved.` },
+  ...reviewerRole,
   { name: 'approved_on', type: 'date', required: 'when-approved', about: `The day it was approved. Needed when the status is approved.` },
   { name: 'audited_by', type: 'text', required: 'optional', maxLength: SIGNER_LENGTH, about: `Who checked the approval afterwards. Optional, but given together with audited_on.` },
   { name: 'audited_on', type: 'date', required: 'optional', about: `The day of that check. Optional, but given together with audited_by.` },
@@ -452,7 +463,7 @@ export const CONTRACT: Contract = {
             'The groups that should not be used together with this rule\'s group, separated by ;. The relation goes both ways: if retinoid lists exfoliating-acid, a rule of the exfoliating-acid group lists retinoid. Needs a group on the rule.',
         },
         statusColumn('draft: still being worked on, and applies to nothing. approved: in force. retired: no longer in force; the row stays so its code is never reused.'),
-        ...signOff('rule'),
+        ...signOff('rule', reviewerRoleColumn('rule')),
       ],
       checks: [
         { rule: 'DUPLICATE_RULE', about: 'One rule for each ingredient name or alias and kind among the rules that are not retired; a draft counts.' },
@@ -485,8 +496,9 @@ export const CONTRACT: Contract = {
         { name: 'code', type: 'pattern', required: 'always', pattern: CODE_PATTERN, patternRule: 'BAD_CODE', patternAbout: CODE_ABOUT, unique: true, about: 'Our own short code for the claim word, such as CLM-WHITENING. It never changes once the word is in the workbook.' },
         { name: 'phrase', type: 'text', required: 'always', maxLength: PHRASE_LENGTH, plainText: true, lowerCase: true, about: 'The words, in lower case, as they appear in a product name: for example "whitening".' },
         { name: 'claim', type: 'vocabulary', required: 'always', vocabulary: 'claims', about: 'What the phrase claims. Only lightening, for now.' },
+        { name: 'source_url', type: 'url', required: 'optional', about: 'A link to the page behind the claim word. Optional.' },
         statusColumn('approved: in force. retired: no longer in force; the row stays so its code is never reused. A claim word has no draft: leave a word you are unsure of out of the workbook.', 'claimWordStatuses'),
-        ...signOff('claim word'),
+        ...signOff('claim word', reviewerRoleColumn('claim word')),
       ],
       checks: [
         { rule: 'DUPLICATE_PHRASE', about: 'One claim word for each phrase among the words that are not retired.' },
@@ -688,6 +700,7 @@ export type IngredientRule = {
   clashesWith: IngredientGroup[]
   status: RowStatus
   approvedBy: string | null
+  reviewerRole: string | null
   approvedOn: Date | null
   auditedBy: string | null
   auditedOn: Date | null
@@ -699,8 +712,10 @@ export type ClaimWordRow = {
   code: string
   phrase: string
   claim: 'lightening'
+  sourceUrl: string | null
   status: 'approved' | 'retired'
   approvedBy: string | null
+  reviewerRole: string | null
   approvedOn: Date | null
   auditedBy: string | null
   auditedOn: Date | null
@@ -1375,6 +1390,7 @@ class WorkbookValidator {
       clashesWith: s.vocabularyList<IngredientGroup>(i, 'clashes_with'),
       status: s.vocabulary<RowStatus>(i, 'status')!,
       approvedBy: s.text(i, 'approved_by'),
+      reviewerRole: s.text(i, 'reviewer_role'),
       approvedOn: s.date(i, 'approved_on'),
       auditedBy: s.text(i, 'audited_by'),
       auditedOn: s.date(i, 'audited_on'),
@@ -1402,8 +1418,10 @@ class WorkbookValidator {
       code: s.pattern(i, 'code')!,
       phrase: s.text(i, 'phrase')!,
       claim: s.vocabulary<ClaimWordRow['claim']>(i, 'claim')!,
+      sourceUrl: s.url(i, 'source_url'),
       status: s.vocabulary<ClaimWordRow['status']>(i, 'status')!,
       approvedBy: s.text(i, 'approved_by'),
+      reviewerRole: s.text(i, 'reviewer_role'),
       approvedOn: s.date(i, 'approved_on'),
       auditedBy: s.text(i, 'audited_by'),
       auditedOn: s.date(i, 'audited_on'),

@@ -1841,14 +1841,14 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   to change a rule. The workbook is where a rule changes.
 - **`liveRules()`** (`CatalogWorkbookRepository`, in the catalog module) returns `{ version, entries }`: the latest rules version, and the approved rules
   in the shape the matcher reads, in code order. It reads the latest version on every call, and keeps the entries per isolate, **keyed by the catalog
-  version number** (every applied upload moves it, including one that changes only a rule's `group` or `clashes_with`, which the rules version does not
+  version number** (every applied upload moves it, including one that changes only a rule's `group`, `clashes_with` or `reviewer_role`, which the rules version does not
   see, so a key on the rules version would serve that metadata stale; a Products-only upload costs one re-read). When the catalog version has moved, it reads the version and the rule rows in ONE
   `db.batch`, so an upload cannot land between them and leave new rules stored under the old version. `ProductCatalogService` reads it only where it needs
   it: `analyse` once (the facts the analyst is given and the version the analysis is stored under are the same rules), and `research` only when a stale
   formulation could be the fallback. `flagFacts(ingredients, rules)` takes the rules as an argument, so the eval calls it with `REFERENCE`, and the facts of
   one name that has several kinds come out in a fixed order (banned first, then the commonly cited concerns), never in the order the rows were read.
 - **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: eleven tabs (Products, Availability, Ingredients,
-  Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses, Weeks; contract 2.3.0), their columns, accepted values and
+  Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses, Weeks; contract 2.4.0), their columns, accepted values and
   length caps, and `validateWorkbook(raw)`, which returns the parsed workbook or EVERY problem as `{ tab, row, column, rule }` (a fixed code, never a cell
   value). A tab is `{ headers, rows }`: the header row decides which columns exist, a key a row has that is no header is ignored, and a key it lacks is an
   empty cell. A cell is measured before it is read, so a cell over its cap says only that, and a 32767-character cell costs about its length. The module is
@@ -3022,6 +3022,18 @@ Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Rei
      **After the 2.3.0 deploy, re-export the staging catalog sheet and fill the required rows (the default ladder, a row for each reason and each outcome, a base card for
      each band) before its next import**: an unedited export is refused until then, and a 2.2.0 file is refused as `409 CONTRACT_MISMATCH`. The same goes for a saved
      eval snapshot workbook.
+  3d. **Reviewer role, claim word source and the `about-a-product` escalation** (contract 2.4.0, spec #259) are what the shelf verdict shows next to a reason.
+     Ingredients and Claim words gain `reviewer_role` (after `approved_by`): plain text of at most 80 characters, required once the row is approved, and the role of
+     the person who reviewed the row as the app shows it under "Reviewed by" (for example "a consultant dermatologist"), **never a name**. Claim words also gain an
+     optional https `source_url`. Both are nullable columns (`reviewer_role` on `ingredient_rules` and `claim_words`, `source_url` on `claim_words`), and a row stored
+     before 2.4.0 reads them as null. **`reviewer_role` is rule metadata, not part of the rules version**, like `group` and `clashes_with`: the fingerprint still hashes
+     only what the matcher reads, so a change to it moves the catalog version and re-analyses nothing. `readVerdictReference` gives them (`reviewerRole` on a rule and a
+     claim word, `sourceUrl` on a claim word); the production approver gate is unchanged and does not cover these two tabs. `ESCALATION_REASONS` gains `about-a-product`
+     at the end: the reviewed text shown when a person taps "Talk to a professional" about a shelf product, and, like every reason, it needs its one approved row
+     (`ESCALATION_MISSING`) and passes the wording gate.
+     **After the 2.4.0 deploy, re-export the staging catalog sheet, fill `reviewer_role` on every approved Ingredients and Claim words row, and add the approved
+     `about-a-product` Escalations row before its next import**: an unedited export is refused until then, and a 2.3.0 file is refused as `409 CONTRACT_MISMATCH`.
+     The same goes for a saved eval snapshot workbook.
   4. **The join is exact.** A Products row finds its catalog product by identity key, then by alias; otherwise it is a new product (listed in
      `newProducts`, which a dry run shows too). There is **no near-miss search and no model call**, so an import makes no outbound request; a different
      spelling of a product the catalog knows becomes a second product, which the diff makes visible. The workbook's list is stored as a formulation of
@@ -3048,8 +3060,8 @@ Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Rei
   exactly `{ name, aliases, kind, rule, source }`, so adding groups to the seeded rules re-analyses no formulation; they are read with the workbook
   (`readWorkbook`). The live-rules cache (per isolate) is keyed on the catalog version, which is read on every call, so an isolate re-reads the rules on its first call after an upload lands; a call already in flight at that moment can still return the previous rules. None of the three is ever deleted.
 - **A saved routine reads its recommended product by code, retired or not sold here.** `CatalogWorkbookService.recommendedByCode(codes)` (modelled on `tapersByCode`) gives a `Map` from code to `{ code, status, productId, formulationId (null for a retired row with no list), origin, keyIngredient, strength, availability: { country, priceMin, priceMax, whereSold }[] }` for every row asked for **whatever its status** (a retired row is returned) and **every country it is sold in** (country order; empty if none), where `approvedFor` only returns approved rows sold in one country. A code with no row is absent. The codes are looked up in chunks (`queryByIds`), so any number stays under D1's 100 bound parameters.
-- **Statement budget.** The three new tables are written in chunks like the others (11 claim words, 9 tapers and 6 rules to a statement, rules now binding
-  16 parameters a row), inside the same single batch; so are guides, 7 to a statement (13 parameters a row), retired by 90 keys a statement.
+- **Statement budget.** The three new tables are written in chunks like the others (9 claim words, 9 tapers and 5 rules to a statement, rules now binding
+  17 parameters a row and claim words 11), inside the same single batch; so are guides, 7 to a statement (13 parameters a row), retired by 90 keys a statement.
 - **The race guard is the primary key.** The batch's FIRST statement inserts the next catalog version, `baseVersion + 1`. If another upload took that version
   since the service read it, the insert violates `catalog_versions.version` and D1 rolls the WHOLE batch back, so the loser writes nothing: no product, no
   formulation, no row, no version. The repository then sees that the live version moved past `baseVersion` and reports it, and the service answers

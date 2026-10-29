@@ -84,6 +84,8 @@ const ESCALATIONS: Record<EscalationReason, Escalation> = {
   'hard-to-ignore-during-step-down': { whoToSee: 'A doctor or pharmacist about a strong flare.', howSoon: 'Today.', whatToTellThem: 'What you noticed and the cream you are stepping down.' },
   'worse-after-pause': { whoToSee: 'A doctor or pharmacist about skin that is worse.', howSoon: 'Within a day or two.', whatToTellThem: 'What you paused, for how long, and how it is now.' },
   'unchanged-after-checks': { whoToSee: 'A pharmacist or a doctor about skin that has not settled.', howSoon: 'This week.', whatToTellThem: 'What you paused, and that it has not changed in nine days.' },
+  // Contract 2.4.0's reason for a shelf product: the daily loop never opens a hold for it, but the table has a row for every reason.
+  'about-a-product': { whoToSee: 'A pharmacist or a dermatologist about a product.', howSoon: 'Before you use it again.', whatToTellThem: 'The product, and what you noticed.' },
 }
 
 // The default ladder has a rung of a week each; the retinoid one has a first rung of two weeks, so the two cannot be taken for each other.

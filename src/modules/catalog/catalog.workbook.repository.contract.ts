@@ -19,6 +19,8 @@ export type RuleRow = {
   /** Rule metadata the floor reads: null for most rules. Not part of what the matcher reads, so not part of the rules version. */
   group: IngredientGroup | null
   clashesWith: IngredientGroup[]
+  /** The role of the person who reviewed the rule, as the app shows it under "Reviewed by" (never a name). Null for a rule stored before contract 2.4.0. Not part of what the matcher reads. */
+  reviewerRole: string | null
   status: 'draft' | 'approved' | 'retired'
   approvedBy: string | null
   approvedOn: string | null
@@ -48,6 +50,7 @@ export const ruleRow = (over: Partial<RuleRow> = {}): RuleRow => {
     helps: ['hd_redness'],
     group: null,
     clashesWith: [],
+    reviewerRole: 'a consultant dermatologist',
     status: 'approved',
     approvedBy: 'Dr A. Reviewer',
     approvedOn: APPROVED_ON,
@@ -120,11 +123,26 @@ export const sale = (code: string, country: string, over: Partial<{ priceMin: nu
 })
 export const country = (code: string, status: 'active' | 'retired' = 'active') => ({ code, currency: 'NGN', lowMax: 5000, midMax: 15000, status })
 
-/** A Claim words row as an upload parses it (the days are Dates). The properties are the contract's camelCased column names. */
-export const claimWordRow = (over: Partial<{ code: string; phrase: string; claim: 'lightening'; status: 'approved' | 'retired'; approvedBy: string | null; approvedOn: Date | null; auditedBy: string | null; auditedOn: Date | null }> = {}) => ({
+/** A Claim words row as an upload parses it (the days are Dates). The properties are the contract's camelCased column names. Every optional cell is filled in, so a round trip tests it. */
+export const claimWordRow = (
+  over: Partial<{
+    code: string
+    phrase: string
+    claim: 'lightening'
+    sourceUrl: string | null
+    reviewerRole: string | null
+    status: 'approved' | 'retired'
+    approvedBy: string | null
+    approvedOn: Date | null
+    auditedBy: string | null
+    auditedOn: Date | null
+  }> = {},
+) => ({
   code: `CLM-${runSalt}-${counter++}`,
   phrase: fresh('zzyzx cream'),
   claim: 'lightening' as const,
+  sourceUrl: 'https://example.com/why-this-phrase-is-flagged' as string | null,
+  reviewerRole: 'a consultant dermatologist' as string | null,
   status: 'approved' as 'approved' | 'retired',
   approvedBy: 'Dr A. Reviewer' as string | null,
   approvedOn: DAY as Date | null,
@@ -554,6 +572,34 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
         expect((await repo.liveRules()).entries.find((entry) => entry.name === rule.name)).toEqual({ name: rule.name, aliases: [], kind: rule.kind, rule: rule.statement, source: null })
       })
 
+      it('stores the reviewer role of a rule and reads it back, while the live rules stay exactly what the matcher reads: the role is not part of them', async () => {
+        const { repo } = await make()
+        const rule = ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx'), aliases: [], helps: [], strengthLimit: null, auditedBy: null, auditedOn: null, reviewerRole: 'a registered pharmacist' })
+        const { approvedOn: _day, ...rest } = rule
+
+        await repo.applyWorkbook(await planOf(repo, { rulesVersion: fresh('rules-contract-role'), ingredients: [{ ...rest, approvedOn: DAY, auditedOn: null }] }))
+
+        expect((await repo.readWorkbook()).workbook.ingredients.find((row) => row.code === rule.code)).toMatchObject({ reviewerRole: 'a registered pharmacist' })
+        expect((await repo.liveRules()).entries.find((entry) => entry.name === rule.name)).toEqual({ name: rule.name, aliases: [], kind: rule.kind, rule: rule.statement, source: null })
+      })
+
+      it('changes the reviewer role of a rule in place, and clears it to null, without adding a rule', async () => {
+        const { repo } = await make()
+        const rule = ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx'), aliases: [], helps: [], strengthLimit: null, auditedBy: null, auditedOn: null, reviewerRole: 'a pharmacist' })
+        const { approvedOn: _day, ...rest } = rule
+        const version = fresh('rules-contract-rerole')
+        await repo.applyWorkbook(await planOf(repo, { rulesVersion: version, ingredients: [{ ...rest, approvedOn: DAY, auditedOn: null }] }))
+        const rowsBefore = (await repo.readWorkbook()).workbook.ingredients.length
+        const roleNow = async () => (await repo.readWorkbook()).workbook.ingredients.find((row) => row.code === rule.code)?.reviewerRole
+
+        await repo.applyWorkbook(await planOf(repo, { rulesVersion: version, ingredients: [{ ...rest, reviewerRole: 'a consultant dermatologist', approvedOn: DAY, auditedOn: null }] }))
+        expect(await roleNow()).toBe('a consultant dermatologist')
+
+        await repo.applyWorkbook(await planOf(repo, { rulesVersion: version, ingredients: [{ ...rest, reviewerRole: null, approvedOn: DAY, auditedOn: null }] }))
+        expect(await roleNow()).toBeNull()
+        expect((await repo.readWorkbook()).workbook.ingredients).toHaveLength(rowsBefore)
+      })
+
       it('changes the group of a rule in place, and clears it, without adding a rule', async () => {
         const { repo } = await make()
         const rule = ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx'), aliases: [], helps: [], strengthLimit: null, auditedBy: null, auditedOn: null, group: 'steroid' })
@@ -631,6 +677,33 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
           expect(await tapersOf(repo, [other.code])).toEqual([other])
           expect(after.claimWords).toHaveLength(before.claimWords.length)
           expect(after.tapers).toHaveLength(before.tapers.length)
+        })
+
+        it('stores the reviewer role and the source link of a claim word and reads them back, changes both in place, and clears both to null', async () => {
+          const { repo } = await make()
+          const claim = claimWordRow({ reviewerRole: 'a pharmacist', sourceUrl: 'https://example.com/first' })
+          await repo.applyWorkbook(await planOf(repo, { claimWords: [claim] }))
+          expect(await claimsOf(repo, [claim.code])).toEqual([claim])
+          const rows = (await repo.readWorkbook()).workbook.claimWords.length
+
+          const newer = { ...claim, reviewerRole: 'a consultant dermatologist', sourceUrl: 'https://example.com/second' }
+          await repo.applyWorkbook(await planOf(repo, { claimWords: [newer] }))
+          expect(await claimsOf(repo, [claim.code])).toEqual([newer])
+
+          const bare = { ...claim, reviewerRole: null, sourceUrl: null }
+          await repo.applyWorkbook(await planOf(repo, { claimWords: [bare] }))
+          expect(await claimsOf(repo, [claim.code])).toEqual([bare])
+          expect((await repo.readWorkbook()).workbook.claimWords).toHaveLength(rows)
+        })
+
+        it('keeps the reviewer role and the source link of a claim word when it is retired', async () => {
+          const { repo } = await make()
+          const claim = claimWordRow({ reviewerRole: 'a pharmacist', sourceUrl: 'https://example.com/kept' })
+          await repo.applyWorkbook(await planOf(repo, { claimWords: [claim] }))
+
+          await repo.applyWorkbook(await planOf(repo, { retiredClaimWords: [claim.code] }))
+
+          expect(await claimsOf(repo, [claim.code])).toEqual([{ ...claim, status: 'retired' }])
         })
 
         it('reads them in code order, retired ones included', async () => {
@@ -949,6 +1022,30 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
         }
       })
 
+      // about-a-product (contract 2.4.0) is a reason like the others: stored whole under its own key, read back by approvedEscalation, and a draft of it is not given.
+      describe('the about-a-product escalation', () => {
+        it('stores it whole, reads it back with the workbook, and gives it as the approved escalation of that reason', async () => {
+          const { repo } = await make()
+          const row = escalationRow({ reason: 'about-a-product', auditedBy: 'Dr B. Auditor', auditedOn: DAY })
+
+          expect(await repo.applyWorkbook(await planOf(repo, { escalations: [row] }))).toBe(true)
+
+          expect((await repo.readWorkbook()).workbook.escalations.filter((one) => one.reason === 'about-a-product')).toEqual([row])
+          expect(await repo.approvedEscalation('about-a-product')).toEqual(row)
+        })
+
+        it('gives null for it when the row is a draft, and leaves the escalation of another reason as it was', async () => {
+          const { repo } = await make()
+          const other = escalationRow({ reason: 'swelling' })
+          await repo.applyWorkbook(await planOf(repo, { escalations: [other] }))
+
+          await repo.applyWorkbook(await planOf(repo, { escalations: [escalationRow({ reason: 'about-a-product', status: 'draft', approvedBy: null, approvedOn: null })] }))
+
+          expect(await repo.approvedEscalation('about-a-product')).toBeNull()
+          expect(await repo.approvedEscalation('swelling')).toEqual(other)
+        })
+      })
+
       describe('approvedFor', () => {
         const rows = async (repo: CatalogWorkbookRepository, where: string) => {
           const fixtures: Record<string, Fixture> = {
@@ -1090,6 +1187,34 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
           expect(reference.rules.find((row) => row.code === approved.code)).toMatchObject({ name: approved.name, group: 'retinoid', clashesWith: ['exfoliating-acid'], helps: ['hd_texture'], statement: approved.statement })
           expect(mine(reference.claimWords, [claim.code, oldClaim.code])).toEqual([claim, { ...oldClaim, status: 'retired' }].sort((a, b) => (a.code < b.code ? -1 : 1)))
           expect(mine(reference.tapers, [taper.code, oldTaper.code])).toEqual([taper, { ...oldTaper, status: 'retired' }].sort((a, b) => (a.code < b.code ? -1 : 1)))
+        })
+
+        it('gives the reviewer role and the source link of each approved rule, and of each approved claim word, for the verdict to explain itself with', async () => {
+          const { repo } = await make()
+          const rule = ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx'), sourceUrl: 'https://example.com/rule-source', reviewerRole: 'a consultant dermatologist' })
+          const claim = claimWordRow({ sourceUrl: 'https://example.com/claim-source', reviewerRole: 'a pharmacist' })
+          await repo.applyWorkbook(await planOf(repo, { rulesVersion: fresh('rules-contract-ref'), ingredients: [planned(rule)], claimWords: [claim] }))
+
+          const reference = await repo.readVerdictReference()
+
+          expect(reference.rules.find((row) => row.code === rule.code)).toMatchObject({ reviewerRole: 'a consultant dermatologist', sourceUrl: 'https://example.com/rule-source' })
+          expect(reference.claimWords.find((row) => row.code === claim.code)).toMatchObject({ reviewerRole: 'a pharmacist', sourceUrl: 'https://example.com/claim-source' })
+        })
+
+        it('gives null, not a missing field, for the reviewer role and the source link of a row that has none: what a row stored before contract 2.4.0 reads as', async () => {
+          const { repo } = await make()
+          const rule = ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx'), sourceUrl: null, reviewerRole: null })
+          const claim = claimWordRow({ sourceUrl: null, reviewerRole: null })
+          await repo.applyWorkbook(await planOf(repo, { rulesVersion: fresh('rules-contract-ref'), ingredients: [planned(rule)], claimWords: [claim] }))
+
+          const reference = await repo.readVerdictReference()
+
+          const readRule = reference.rules.find((row) => row.code === rule.code)
+          const readClaim = reference.claimWords.find((row) => row.code === claim.code)
+          expect(readRule).toHaveProperty('reviewerRole', null)
+          expect(readRule).toHaveProperty('sourceUrl', null)
+          expect(readClaim).toHaveProperty('reviewerRole', null)
+          expect(readClaim).toHaveProperty('sourceUrl', null)
         })
 
         it('gives exactly the rows the whole-workbook read gives for those three tabs, in the same order, and not the products, availability or countries', async () => {
