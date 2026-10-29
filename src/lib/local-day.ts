@@ -16,10 +16,37 @@ const formatterFor = (zone: string): Intl.DateTimeFormat => {
   return formatter
 }
 
+const hourFormatters = new Map<string, Intl.DateTimeFormat>()
+
+/** The hour of the day (0 to 23) `now` falls in, in `zone`; a null zone is UTC. Throws a RangeError for a zone Intl does not know. */
+export const localHour = (now: Date, zone: string | null): number => {
+  const key = zone ?? 'UTC'
+  let formatter = hourFormatters.get(key)
+  if (!formatter) {
+    // h23, not hour12: false, which some engines spell "24" at midnight.
+    formatter = new Intl.DateTimeFormat('en-US', { timeZone: key, hour: '2-digit', hourCycle: 'h23' })
+    hourFormatters.set(key, formatter)
+  }
+  return Number(formatter.formatToParts(now).find((p) => p.type === 'hour')!.value)
+}
+
 /** The calendar day `now` falls on in `zone`, as 'YYYY-MM-DD'. Throws a RangeError for a zone Intl does not know. */
 export const localDay = (now: Date, zone: string | null): string => {
   const part = (type: string) => formatterFor(zone ?? 'UTC').formatToParts(now).find((p) => p.type === type)!.value
   return `${part('year')}-${part('month')}-${part('day')}`
+}
+
+/** The zone itself when Intl can read days and hours in it, else null (UTC): a stored zone that was valid when saved must not make a read fail. Anything but a RangeError is rethrown. */
+export const usableZone = (now: Date, zone: string | null): string | null => {
+  if (zone === null) return null
+  try {
+    localDay(now, zone)
+    localHour(now, zone)
+    return zone
+  } catch (error) {
+    if (error instanceof RangeError) return null
+    throw error
+  }
 }
 
 /**
