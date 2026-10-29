@@ -54,7 +54,9 @@ import { SkinCareService } from './modules/skin-care/skin-care.service'
 import type { SkinCareRoutine } from './modules/skin-care/skin-care.types'
 import { D1UsersRepository } from './modules/users/users.repository'
 import { UsersService } from './modules/users/users.service'
+import { D1VerdictReportsRepository } from './modules/verdicts/verdicts.reports.repository'
 import { D1VerdictsRepository } from './modules/verdicts/verdicts.repository'
+import { VerdictReportsService } from './modules/verdicts/verdicts.reports.service'
 import { VerdictService } from './modules/verdicts/verdicts.service'
 import { routineWriterWriteRoutinePrompt } from './prompts/prompts.generated'
 import { AnthropicClient } from './providers/anthropic/anthropic.client'
@@ -417,6 +419,10 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const verdictReports = once(
+    () => new VerdictReportsService({ repository: new D1VerdictReportsRepository(db()), verdicts: verdicts(), opsAlerts: opsAlerts(), now: () => new Date() }),
+  )
+
   const routines = once(() => {
     const client = routineWriterAnthropic()
     return new RoutineService({
@@ -608,6 +614,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get verdicts() {
       return verdicts()
+    },
+    get verdictReports() {
+      return verdictReports()
     },
   }
 }

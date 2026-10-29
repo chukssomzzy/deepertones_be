@@ -1526,6 +1526,28 @@
           "seeAProfessionalIf"
         ]
       },
+      "VerdictReport": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The report's id."
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "VerdictReportBody": {
+        "type": "object",
+        "properties": {
+          "note": {
+            "type": "string",
+            "description": "What looks wrong, in the person's own words. Trimmed; at most 500 characters once trimmed (more is 400 `VALIDATION_FAILED`); empty or spaces only is no note. Only the team reads it."
+          }
+        },
+        "additionalProperties": false
+      },
       "Routine": {
         "oneOf": [
           {
@@ -7827,6 +7849,177 @@
           },
           "503": {
             "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/verdict/products/{entryId}/reports": {
+      "post": {
+        "operationId": "reportVerdictMistake",
+        "tags": [
+          "Verdict"
+        ],
+        "summary": "Tell the team a product's verdict looks wrong",
+        "description": "For a signed-up account. Stores a report for the team to read and changes nothing the person sees: the verdict stays as it is. The product must be one of the verdict the person is served now, which is a ready verdict built from the shelf, answers, goal and rules as they are now: a pending or out-of-date verdict has none, so every entry is 404 `VERDICT_PRODUCT_NOT_FOUND`. The checks run in this order: 401 without a session; 400 `VALIDATION_FAILED` for a malformed body (a field other than `note`, or a `note` that is not text); 403 `SIGNUP_REQUIRED` for a guest; 400 `VALIDATION_FAILED` for a `note` over 500 characters once trimmed; then 404. Send `{}` to report with no note. 201 with the new report's `id`; 200 with the same `id` when the same product was already reported on the same verdict, which replaces its note.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "The shelf entry the report is about: the `entryId` of a product of `GET /api/v1/me/verdict`."
+            },
+            "required": true,
+            "description": "The shelf entry the report is about: the `entryId` of a product of `GET /api/v1/me/verdict`.",
+            "name": "entryId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerdictReportBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The product had been reported on this verdict: its report was updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/VerdictReport"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The report was stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/VerdictReport"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
             "content": {
               "application/json": {
                 "schema": {
