@@ -1590,13 +1590,16 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
 | `ai-spend-cap`    | A call takes the UTC day's AI spend past `AI_DAILY_BUDGET_USD`                               | UTC day               |
 | `research-budget` | A research attempt is made when the day's count has reached `dailyResearchBudget` (200)      | UTC day               |
 | `analysis-budget` | An analysis attempt is made when the day's count has reached `dailyAnalysisBudget` (300)     | UTC day               |
+| `verdict-report`  | A person's mistake report on a shelf verdict is stored as a new row (see "Shelf verdict")    | UTC day               |
+| `wrong-match-report` | A shelf swap records a wrong-match report in `verdict_reports` (raised by the swap, not yet built) | UTC day         |
+| `share-render-quota` | Cloudflare Images' free monthly allowance (5,000 unique transformations) is used up: new share cards are refused until it resets, and the email says to turn on Images Paid (raised by the share-card render, not yet built) | hour |
 
 - **`raise(kind)` never throws.** It is called from the paths that hit the problem (the ledger's `reserve`, the catalog's
   `research` and `analyse`, the scan service), and an alert that cannot be raised must never cost them their work. A failure
   is logged `{ outcome: 'ops-alert-failed', kind, error }` with the error's name only.
 - **One claim per kind and window, then a job.** `OpsAlertsRepository.claim(kind, windowStart)` is ONE guarded upsert on
   `ops_alert_claims` (one row per kind, replaced only by a newer window), so however many callers hit the problem in a window
-  exactly one wins, and only the winner queues the `send-ops-alert` job. The window is the start of the UTC hour (`ai-account`, `face-scan-account`)
+  exactly one wins, and only the winner queues the `send-ops-alert` job. The window is the start of the UTC hour (`ai-account`, `face-scan-account`, `share-render-quota`)
   or UTC day (the rest). The repository does not know how long a window is. *Trade-off:* the window is claimed before the job is
   queued, so a queue outage loses that window's email (the next window sends); queueing first would send one email per caller.
 - **`send-ops-alert` is the first job on the shared `email` queue** (see "Background jobs"), keyed `kind:windowStart`, so a

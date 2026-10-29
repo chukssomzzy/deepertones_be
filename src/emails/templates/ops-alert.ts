@@ -7,7 +7,7 @@ export const opsAlert = defineTemplate<{ environment: string; kind: string; what
   render: ({ environment, kind, what, todo }) => ({
     subject: `[${environment}] ${kind}: Deeper Tones needs a look`,
     preheader: `${kind} in ${environment}.`,
-    body: html`${paragraph(`Environment: ${environment}. Alert: ${kind}.`)}${paragraph(what)}${paragraph(todo)}${paragraph('You get this at most once an hour (account problems) or once a day (limits) for each alert.', { muted: true })}`,
+    body: html`${paragraph(`Environment: ${environment}. Alert: ${kind}.`)}${paragraph(what)}${paragraph(todo)}${paragraph('You get this at most once an hour or once a day for each alert, depending on the alert.', { muted: true })}`,
   }),
   sample: {
     environment: 'staging',
