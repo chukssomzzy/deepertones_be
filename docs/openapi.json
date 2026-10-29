@@ -3743,6 +3743,63 @@
           "current"
         ]
       },
+      "FaceShareConsentGivenResponse": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "givenAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "version",
+          "givenAt"
+        ]
+      },
+      "SetFaceShareConsentBody": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "The version of the face share consent wording the user agreed to. Only the current version is accepted."
+          }
+        },
+        "required": [
+          "version"
+        ]
+      },
+      "FaceShareConsentResponse": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "givenAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "withdrawnAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "current": {
+            "type": "boolean",
+            "description": "True while the consent is for the current wording and has not been withdrawn: the only consent a share accepts."
+          }
+        },
+        "required": [
+          "version",
+          "givenAt",
+          "withdrawnAt",
+          "current"
+        ]
+      },
       "ProductSearch": {
         "type": "object",
         "properties": {
@@ -10111,6 +10168,258 @@
         ],
         "summary": "Take back the face photo consent",
         "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. Stamps the time and keeps the record; it deletes no photos (delete a face scan to do that). 204 again when already withdrawn, and 204 when there was never any consent.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The consent is withdrawn"
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/face-share-consent": {
+      "put": {
+        "operationId": "setFaceShareConsent",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "Say yes to sharing a before-and-after card",
+        "description": "The consent covers sharing a before-and-after card of the face photos, made by the server and never stored. For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. The consent belongs to the active profile. Send `{ version }`, the version of the consent wording the user agreed to: only the current one is accepted, any other is 400 `FACE_SHARE_CONSENT_VERSION_MISMATCH` with `details.current`. It is asked once and remembered. Giving consent again, or after a withdrawal, is 200 and starts it afresh.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFaceShareConsentBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The consent as given",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/FaceShareConsentGivenResponse"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getFaceShareConsent",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "The face share consent this profile gave",
+        "description": "The consent covers sharing a before-and-after card of the face photos, made by the server and never stored. For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. The consent belongs to the active profile. A withdrawn consent is still shown, with `withdrawnAt` and `current` false, as is one for an older wording. 404 `FACE_SHARE_CONSENT_NOT_FOUND` until the profile has given one.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The consent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/FaceShareConsentResponse"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "withdrawFaceShareConsent",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "Take back the face share consent",
+        "description": "The consent covers sharing a before-and-after card of the face photos, made by the server and never stored. For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. The consent belongs to the active profile. Stamps the time and keeps the record. 204 again when already withdrawn, and 204 when there was never any consent. After it, the next share asks again.",
         "security": [
           {
             "bearerAuth": []

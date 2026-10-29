@@ -15,6 +15,7 @@ import { authRoutes, meRoutes } from './modules/auth/auth.routes'
 import { productRoutes } from './modules/catalog/catalog.routes'
 import { adminCatalogRoutes } from './modules/catalog/catalog.workbook.routes'
 import { faceConsentRoutes, faceScanRoutes, webhookRoutes } from './modules/face-scans/face-scans.routes'
+import { faceShareConsentRoutes } from './modules/face-shares/face-shares.routes'
 import { goalsRoutes } from './modules/goals/goals.routes'
 import { healthRoutes } from './modules/health/health.routes'
 import { inboxRoutes } from './modules/inbox/inbox.routes'
@@ -56,6 +57,7 @@ const v1 = openapiApp()
   .route('/me', inboxRoutes)
   .route('/me', skinCareRoutes)
   .route('/me', faceConsentRoutes)
+  .route('/me', faceShareConsentRoutes)
   .route('/products', productRoutes)
   .route('/onboarding', onboardingRoutes)
   .route(PRODUCT_SCANS_PATH, scanRoutes)
