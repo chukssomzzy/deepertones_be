@@ -381,6 +381,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
         notifications: notifications(),
         opsAlerts: opsAlerts(),
+        reminders: reminders(),
         // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
         photoLinkSecret: env.JWT_SECRET,
         environment: photoEnvironment(env.ENVIRONMENT),
