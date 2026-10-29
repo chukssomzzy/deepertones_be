@@ -370,9 +370,9 @@ describe('SkinCareService.stateFor, healing a rebuild whose hook was missed', ()
   })
 
   it('keeps and lists a pause that is still in the routine', async () => {
-    await log(STING)
+    const result = await log(STING)
 
-    expect((await service.stateFor(AMARA, '2030-06-15')).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused' }])
+    expect((await service.stateFor(AMARA, '2030-06-15')).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: result.paused!.id, checkDay: '2030-06-18' }])
   })
 
   it('reads the routine only when there is a pause with a step to check', async () => {
@@ -382,11 +382,11 @@ describe('SkinCareService.stateFor, healing a rebuild whose hook was missed', ()
   })
 
   it('is not fatal when the routine cannot be read: the pauses are still answered, and the failure is logged by ids', async () => {
-    await log(STING)
+    const result = await log(STING)
     routineFails = true
     errors = []
 
-    expect((await service.stateFor(AMARA, '2030-06-15')).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused' }])
+    expect((await service.stateFor(AMARA, '2030-06-15')).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: result.paused!.id, checkDay: '2030-06-18' }])
     expect(errors).toEqual([[...idsLine('skin-care-reconcile-failed')]])
   })
 

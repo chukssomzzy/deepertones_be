@@ -206,7 +206,8 @@ const bringBack = async (who: Actor = AMARA_ACTOR) => {
   const answered = await checkIn(who, made.paused!.id, 'calmer')
   return { id: made.paused!.id, answered }
 }
-const onRung = (frequency: string, anchor: string, productId = 'prod-treat', stepName: RoutineStep = 'treat') => ({ step: stepName, productId, state: 'bringing-back', frequency, anchor })
+// `rung` is the current rung's number from 1 and `of` the rungs before 'back', worked out from the ladder each test freezes.
+const onRung = (frequency: string, anchor: string, rung: number, of: number, productId = 'prod-treat', stepName: RoutineStep = 'treat') => ({ step: stepName, productId, state: 'bringing-back', frequency, anchor, rung, of })
 
 beforeEach(() => {
   world = {
@@ -433,7 +434,7 @@ describe('SkinCareService.answerCheckIn, calmer on a step', () => {
     expect(await row(id)).toMatchObject({ id, step: 'treat', productKey: 'prod-treat', state: 'bringing-back', ladderStartedOn: STARTED })
     expect(await openPauses(AMARA)).toHaveLength(1)
     // The first rung is gentler than the routine's own frequency: 'back' only comes at the end.
-    expect(await service.stateFor(AMARA, STARTED)).toEqual({ pauses: [onRung('weekly', STARTED)], held: false })
+    expect(await service.stateFor(AMARA, STARTED)).toEqual({ pauses: [onRung('weekly', STARTED, 1, 2)], held: false })
   })
 
   it('starts the ladder on the person\'s local day, not the UTC day', async () => {
@@ -493,9 +494,9 @@ describe('SkinCareService.answerCheckIn, calmer on a step', () => {
     world.ladders.set('retinoid', [{ fromWeek: 1, toWeek: 5, frequency: 'as-needed' }, { fromWeek: 6, toWeek: 6, frequency: 'back' }])
 
     expect(ladderOf(await row(id))).toEqual(DEFAULT_LADDER)
-    expect((await service.stateFor(AMARA, dayAt(10))).pauses).toEqual([onRung('alternate-days', dayAt(10))])
+    expect((await service.stateFor(AMARA, dayAt(10))).pauses).toEqual([onRung('alternate-days', dayAt(10), 2, 2)])
     // Its end is still the start of the third week of the frozen schedule, not the second of the edited one.
-    expect((await service.stateFor(AMARA, dayAt(16))).pauses).toEqual([onRung('alternate-days', dayAt(10))])
+    expect((await service.stateFor(AMARA, dayAt(16))).pauses).toEqual([onRung('alternate-days', dayAt(10), 2, 2)])
     expect((await service.stateFor(AMARA, dayAt(17))).pauses).toEqual([])
   })
 
@@ -573,7 +574,7 @@ describe('SkinCareService.answerCheckIn, about the same', () => {
       pause: { id: made.paused!.id, step: 'treat', state: 'paused', checkDay: dayAt(6) },
     })
     expect(await row(made.paused!.id)).toMatchObject({ state: 'paused', checkDay: dayAt(6), sameCount: 1, ladderCode: null })
-    expect(await service.stateFor(AMARA, dayAt(3))).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused' }], held: false })
+    expect(await service.stateFor(AMARA, dayAt(3))).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: made.paused!.id, checkDay: dayAt(6) }], held: false })
   })
 
   it('counts three days from the day it is answered, not from the old check day', async () => {
@@ -711,7 +712,7 @@ describe('an escalated step', () => {
     await checkIn(AMARA_ACTOR, made.paused!.id, 'worse')
 
     for (const day of [dayAt(3), dayAt(40)]) {
-      expect(await service.stateFor(AMARA, day)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused' }], held: true })
+      expect(await service.stateFor(AMARA, day)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: made.paused!.id, checkDay: CHECK_DAY }], held: true })
     }
   })
 
@@ -748,23 +749,23 @@ describe('an escalated step', () => {
 
 describe('SkinCareService.stateFor, a step being brought back', () => {
   it.each([
-    [0, 'weekly', 0],
-    [6, 'weekly', 0],
-    [7, 'alternate-days', 7],
-    [13, 'alternate-days', 7],
-  ])('on the ladder\'s day %i is on %s, with the rung\'s start (day %i) as its anchor', async (offset, frequency, anchorOffset) => {
+    [0, 'weekly', 0, 1],
+    [6, 'weekly', 0, 1],
+    [7, 'alternate-days', 7, 2],
+    [13, 'alternate-days', 7, 2],
+  ])('on the ladder\'s day %i is on %s, with the rung\'s start (day %i) as its anchor', async (offset, frequency, anchorOffset, rung) => {
     await bringBack()
 
-    expect(await service.stateFor(AMARA, dayAt(3 + offset))).toEqual({ pauses: [onRung(frequency, dayAt(3 + anchorOffset))], held: false })
+    expect(await service.stateFor(AMARA, dayAt(3 + offset))).toEqual({ pauses: [onRung(frequency, dayAt(3 + anchorOffset), rung, 2)], held: false })
   })
 
   it('counts the weeks of a rung from the day the ladder started: a rung of two weeks keeps one anchor', async () => {
     world.ladders.set('default', structuredClone(RETINOID_LADDER))
     await bringBack()
 
-    expect((await service.stateFor(AMARA, dayAt(3 + 13))).pauses).toEqual([onRung('weekly', dayAt(3))])
-    expect((await service.stateFor(AMARA, dayAt(3 + 14))).pauses).toEqual([onRung('alternate-days', dayAt(3 + 14))])
-    expect((await service.stateFor(AMARA, dayAt(3 + 20))).pauses).toEqual([onRung('alternate-days', dayAt(3 + 14))])
+    expect((await service.stateFor(AMARA, dayAt(3 + 13))).pauses).toEqual([onRung('weekly', dayAt(3), 1, 2)])
+    expect((await service.stateFor(AMARA, dayAt(3 + 14))).pauses).toEqual([onRung('alternate-days', dayAt(3 + 14), 2, 2)])
+    expect((await service.stateFor(AMARA, dayAt(3 + 20))).pauses).toEqual([onRung('alternate-days', dayAt(3 + 14), 2, 2)])
     expect((await service.stateFor(AMARA, dayAt(3 + 21))).pauses).toEqual([])
   })
 
@@ -798,15 +799,15 @@ describe('SkinCareService.stateFor, a step being brought back', () => {
 
   it('lists a step being brought back beside a paused one', async () => {
     const first = await harm()
-    await harm()
+    const second = await harm()
     world.now = at(3 * DAY)
     await checkIn(AMARA_ACTOR, first.paused!.id, 'calmer')
 
     const state = await service.stateFor(AMARA, STARTED)
 
     expect([...state.pauses].sort((a, b) => a.step.localeCompare(b.step))).toEqual([
-      { step: 'moisturise', productId: 'prod-moisturise', state: 'paused' },
-      onRung('weekly', STARTED),
+      { step: 'moisturise', productId: 'prod-moisturise', state: 'paused', pauseId: second.paused!.id, checkDay: CHECK_DAY },
+      onRung('weekly', STARTED, 1, 2),
     ])
   })
 
@@ -815,7 +816,7 @@ describe('SkinCareService.stateFor, a step being brought back', () => {
     treat().productId = null
     await bringBack()
 
-    expect((await service.stateFor(AMARA, STARTED)).pauses).toEqual([onRung('weekly', STARTED, 'entry-unlabelled')])
+    expect((await service.stateFor(AMARA, STARTED)).pauses).toEqual([onRung('weekly', STARTED, 1, 2, 'entry-unlabelled')])
   })
 })
 
@@ -849,7 +850,7 @@ describe('SkinCareService.log, a harm signal on a step being brought back', () =
 
     await harm()
 
-    expect(await service.stateFor(AMARA, STARTED)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused' }], held: false })
+    expect(await service.stateFor(AMARA, STARTED)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: id, checkDay: dayAt(6) }], held: false })
     expect(await dueIds(dayAt(5))).toEqual([])
     expect(await dueIds(dayAt(6))).toEqual([id])
   })
@@ -963,7 +964,7 @@ describe('SkinCareService.undo, of a pause made again', () => {
 
     expect(undone).toEqual({ id, state: 'bringing-back' })
     expect(await row(id)).toMatchObject({ state: 'bringing-back', ladderCode: ladder.ladderCode, ladderStartedOn: ladder.ladderStartedOn })
-    expect(await service.stateFor(AMARA, STARTED)).toEqual({ pauses: [onRung('weekly', STARTED)], held: false })
+    expect(await service.stateFor(AMARA, STARTED)).toEqual({ pauses: [onRung('weekly', STARTED, 1, 2)], held: false })
     expect((await repository.recent(AMARA, 10)).find((entry) => entry.id === result.log.id)).toMatchObject({ overridden: true })
     expect(await dueIds(dayAt(60))).toEqual([])
   })
@@ -998,7 +999,7 @@ describe('SkinCareService.undo, of a pause made again', () => {
     expect(result.pause).toEqual({ id, step: 'treat', state: 'bringing-back', checkDay: null })
     expect(await row(id)).toMatchObject({ state: 'bringing-back', ladderStartedOn: dayAt(6) })
     expect(ladderOf(await row(id))).toEqual(edited)
-    expect((await service.stateFor(AMARA, dayAt(6))).pauses).toEqual([onRung('as-needed', dayAt(6))])
+    expect((await service.stateFor(AMARA, dayAt(6))).pauses).toEqual([onRung('as-needed', dayAt(6), 1, 1)])
   })
 })
 
@@ -1034,7 +1035,7 @@ describe('SkinCareService.reconcile, a pause whose product was replaced', () => 
     })
     expect(ladderOf(fresh)).toEqual(ACID_LADDER)
     expect(await openPauses(AMARA)).toHaveLength(1)
-    expect((await service.stateFor(AMARA, TODAY)).pauses).toEqual([onRung('as-needed', TODAY, 'prod-better-treat')])
+    expect((await service.stateFor(AMARA, TODAY)).pauses).toEqual([onRung('as-needed', TODAY, 1, 1, 'prod-better-treat')])
   })
 
   it('uses the default ladder for a new product with no active group', async () => {
@@ -1072,7 +1073,7 @@ describe('SkinCareService.reconcile, a pause whose product was replaced', () => 
     expect(await row(id)).toMatchObject({ state: 'replaced' })
     const fresh = (await rowFor('prod-better-treat'))!
     expect(fresh).toMatchObject({ state: 'bringing-back', ladderStartedOn: dayAt(5) })
-    expect((await service.stateFor(AMARA, dayAt(5))).pauses).toEqual([onRung('weekly', dayAt(5), 'prod-better-treat')])
+    expect((await service.stateFor(AMARA, dayAt(5))).pauses).toEqual([onRung('weekly', dayAt(5), 1, 2, 'prod-better-treat')])
   })
 
   it.each([
@@ -1089,7 +1090,7 @@ describe('SkinCareService.reconcile, a pause whose product was replaced', () => 
     const fresh = (await rowFor('prod-better-treat'))!
     expect(fresh).toMatchObject({ step: 'treat', state: 'paused', checkDay: dayAt(4), ladderCode: null, ladderStartedOn: null, sameCount: 0 })
     expect(bringingBackWrites()).toEqual([])
-    expect((await service.stateFor(AMARA, dayAt(1))).pauses).toEqual([{ step: 'treat', productId: 'prod-better-treat', state: 'paused' }])
+    expect((await service.stateFor(AMARA, dayAt(1))).pauses).toEqual([{ step: 'treat', productId: 'prod-better-treat', state: 'paused', pauseId: fresh.id, checkDay: dayAt(4) }])
     expect(await dueIds(dayAt(3))).toEqual([])
     expect(await dueIds(dayAt(4))).toEqual([fresh.id])
   })
@@ -1130,7 +1131,7 @@ describe('SkinCareService.reconcile, a pause whose product was replaced', () => 
 
     await service.stateFor(AMARA, TODAY)
 
-    expect((await service.stateFor(AMARA, TODAY)).pauses).toEqual([onRung('weekly', TODAY, 'prod-better-treat')])
+    expect((await service.stateFor(AMARA, TODAY)).pauses).toEqual([onRung('weekly', TODAY, 1, 2, 'prod-better-treat')])
   })
 
   it('leaves the other steps\' pauses alone', async () => {
@@ -1178,7 +1179,7 @@ describe('SkinCareService.stateFor, when reconcile fails', () => {
 
     const state = await service.stateFor(AMARA, TODAY)
 
-    expect(state).toEqual({ pauses: [onRung('weekly', TODAY, 'prod-better-treat')], held: false })
+    expect(state).toEqual({ pauses: [onRung('weekly', TODAY, 1, 2, 'prod-better-treat')], held: false })
     expect(await rowsFor('prod-better-treat')).toHaveLength(1)
     expect(await openPauses(AMARA)).toHaveLength(1)
   })
@@ -1226,7 +1227,7 @@ describe('SkinCareService.stateFor, when reconcile fails', () => {
   })
 
   it('is still not fatal when the routine cannot be read at all: the pauses are answered, as they were', async () => {
-    await harm()
+    const made = await harm()
     const failing = new SkinCareService({
       repository,
       pauses,
@@ -1246,7 +1247,7 @@ describe('SkinCareService.stateFor, when reconcile fails', () => {
       now: () => world.now,
     })
 
-    expect((await failing.stateFor(AMARA, TODAY)).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused' }])
+    expect((await failing.stateFor(AMARA, TODAY)).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: made.paused!.id, checkDay: CHECK_DAY }])
   })
 })
 
@@ -1264,7 +1265,7 @@ describe('SkinCareService.reconcile, an escalated step whose product was replace
     const fresh = (await openPauses(AMARA)).find((open) => open.productKey === 'prod-better-treat')!
     expect(fresh).toMatchObject({ step: 'treat', state: 'escalated', ladderCode: null, ladderStartedOn: null })
     expect(world.inboxWrites.filter((write) => write.key.startsWith('bringing-back:'))).toEqual([])
-    expect(await service.stateFor(AMARA, dayAt(3))).toEqual({ pauses: [{ step: 'treat', productId: 'prod-better-treat', state: 'paused' }], held: true })
+    expect(await service.stateFor(AMARA, dayAt(3))).toEqual({ pauses: [{ step: 'treat', productId: 'prod-better-treat', state: 'paused', pauseId: fresh.id, checkDay: dayAt(6) }], held: true })
     expect(await dueIds(dayAt(400))).toEqual([])
     expect(await errorOf(checkIn(AMARA_ACTOR, fresh.id, 'calmer'))).toMatchObject({ code: 'PAUSE_NOT_FOUND' })
   })
@@ -1359,7 +1360,7 @@ describe('SkinCareService.stateFor, a ladder that cannot be read', () => {
 
     const state = await service.stateFor(AMARA, STARTED)
 
-    expect(state).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused' }], held: false })
+    expect(state).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: id, checkDay: STARTED }], held: false })
     const stored = await row(id)
     expect(stored).toMatchObject({ state: 'paused', checkDay: STARTED, pausedOn: STARTED, sameCount: 0, sourceLogId: (await row(id)).sourceLogId })
     expect(await dueIds(STARTED)).toEqual([id])
@@ -1388,7 +1389,7 @@ describe('SkinCareService.stateFor, a ladder that cannot be read', () => {
 
     const state = await service.stateFor(AMARA, STARTED)
 
-    expect(state.pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused' }])
+    expect(state.pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: id, checkDay: STARTED }])
     expect(await row(id)).toMatchObject({ state: 'bringing-back' })
     expect(errors.map((line) => line[0])).toEqual(expect.arrayContaining([expect.objectContaining({ profileId: AMARA, pauseId: id })]))
     expect(JSON.stringify(errors)).not.toContain('down')

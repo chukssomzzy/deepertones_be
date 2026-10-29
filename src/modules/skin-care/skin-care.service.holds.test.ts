@@ -573,7 +573,7 @@ describe('SkinCareService.stateFor, and the hold', () => {
     const made = await harm()
     await swell()
 
-    expect(await service.stateFor(AMARA, TODAY)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused' }], held: true })
+    expect(await service.stateFor(AMARA, TODAY)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: made.paused!.id, checkDay: made.paused!.checkDay }], held: true })
     expect(made.paused).toMatchObject({ step: 'treat' })
   })
 
@@ -753,7 +753,7 @@ describe('SkinCareService.closeHold, the check-ins it makes due the same day', (
     const stored = await row(due.id)
     expect(stored).toMatchObject({ state: 'bringing-back', ladderStartedOn: TODAY })
     expect(ladderOf(stored)).toEqual(RETINOID_LADDER)
-    expect(await service.stateFor(AMARA, TODAY)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'bringing-back', frequency: 'weekly', anchor: TODAY }], held: false })
+    expect(await service.stateFor(AMARA, TODAY)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'bringing-back', frequency: 'weekly', anchor: TODAY, rung: 1, of: 2 }], held: false })
   })
 
   it('puts an escalated step back to paused, due today with its "about the same" count cleared, and the next "about the same" is only that', async () => {
@@ -810,7 +810,7 @@ describe('SkinCareService.closeHold, the check-ins it makes due the same day', (
     await checkIn(AMARA_ACTOR, id, 'calmer')
 
     expect(await row(id)).toMatchObject({ state: 'bringing-back', ladderStartedOn: dayAt(5) })
-    expect(await service.stateFor(AMARA, dayAt(5))).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'bringing-back', frequency: 'weekly', anchor: dayAt(5) }], held: false })
+    expect(await service.stateFor(AMARA, dayAt(5))).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'bringing-back', frequency: 'weekly', anchor: dayAt(5), rung: 1, of: 2 }], held: false })
   })
 
   it('leaves a paused row of a step that is not held (a basic) as it was, due when it was due', async () => {

@@ -395,19 +395,19 @@ export class SkinCareService {
     for (const pause of [...open.filter(({ id }) => !replaced.has(id)), ...started]) {
       if (pause.step === null) continue
       if (pause.state !== 'bringing-back') {
-        if (pause.state === 'paused' || pause.state === 'escalated') pauses.push({ step: pause.step, productId: pause.productKey, state: 'paused' })
+        if (pause.state === 'paused' || pause.state === 'escalated') pauses.push({ step: pause.step, productId: pause.productKey, state: 'paused', pauseId: pause.id, checkDay: pause.checkDay })
         continue
       }
       const rung = SkinCareService.rungOf(pause, today)
       if (rung === null) {
         // A ladder that cannot be read keeps the step out rather than let it back at full strength, and the person is asked.
         console.error({ outcome: 'skin-care-ladder-unreadable', profileId, pauseId: pause.id })
-        pauses.push({ step: pause.step, productId: pause.productKey, state: 'paused' })
+        pauses.push({ step: pause.step, productId: pause.productKey, state: 'paused', pauseId: pause.id, checkDay: today })
         await this.askAbout(profileId, pause, today)
       } else if (rung.frequency === 'back') {
         await this.endLadder(profileId, pause.id)
       } else {
-        pauses.push({ step: pause.step, productId: pause.productKey, state: 'bringing-back', frequency: rung.frequency as Frequency, anchor: rung.anchor })
+        pauses.push({ step: pause.step, productId: pause.productKey, state: 'bringing-back', frequency: rung.frequency as Frequency, anchor: rung.anchor, rung: rung.rung, of: rung.of })
       }
     }
     return { pauses, held: (await this.holds.openFor(profileId)) !== null }
@@ -757,9 +757,9 @@ export class SkinCareService {
   /**
    * The rung a `bringing-back` row is on today: the last rung that has started (rung n starts `ladderStartedOn` + 7 * (fromWeek - 1) days), the first before any has. Null when the ladder stored
    * on the row is not one `reintroductionFor` could have given: whole weeks from 1 on the first rung and ascending after it, each rung ending no earlier than it starts, a known frequency on
-   * every rung, `back` on the last rung only, and a real date for every rung's start.
+   * every rung, `back` on the last rung only, and a real date for every rung's start. `rung` is the chosen rung's number from 1, and `of` the rungs before `back`.
    */
-  private static rungOf(pause: StepPause, today: string): { frequency: string; anchor: string } | null {
+  private static rungOf(pause: StepPause, today: string): { frequency: string; anchor: string; rung: number; of: number } | null {
     try {
       const startedOn = pause.ladderStartedOn
       const ladder: unknown = JSON.parse(pause.ladderCode ?? '')
@@ -778,7 +778,9 @@ export class SkinCareService {
         before = to
         starts.push({ frequency, anchor })
       }
-      return starts.filter(({ anchor }) => anchor <= today).at(-1) ?? starts[0]!
+      const started = starts.filter(({ anchor }) => anchor <= today).length
+      const at = Math.max(started, 1) - 1
+      return { ...starts[at]!, rung: at + 1, of: starts.length - 1 }
     } catch {
       return null
     }

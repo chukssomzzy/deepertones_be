@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { localDate, localDay, nextLocalDay, startOfLocalDay } from './local-day'
+import { localDate, localDay, localHour, nextLocalDay, startOfLocalDay } from './local-day'
 
 // Local days (spec #217): which calendar day a person is on, and the UTC instant their local day begins, in their IANA time zone. A person with no stored zone is
 // on the UTC day. These are the instants the routine stamps day 1 and step-down dates with, so every one is checked at the edge on both sides.
@@ -259,5 +259,36 @@ describe('localDate', () => {
     const NEW_YEAR_EVE = Date.UTC(2030, 11, 31)
     expect(iso(localDate(at(NEW_YEAR_EVE, 23 * HOUR - 1), 'Africa/Lagos'))).toBe('2030-12-31T00:00:00.000Z')
     expect(iso(localDate(at(NEW_YEAR_EVE, 23 * HOUR), 'Africa/Lagos'))).toBe('2031-01-01T00:00:00.000Z')
+  })
+})
+
+// The hour Today splits the day at (spec #233): 0 to 23 on the person's own clock, hand-worked from each zone's offset.
+describe('localHour', () => {
+  it.each([
+    ['UTC for a null zone', null, MIDSUMMER + 14 * HOUR + 59 * MINUTE, 14],
+    ['midnight is 0, never 24', null, MIDSUMMER, 0],
+    ['Africa/Lagos (UTC+1)', 'Africa/Lagos', MIDSUMMER + 14 * HOUR, 15],
+    ['Europe/London in BST (UTC+1)', 'Europe/London', MIDSUMMER + 23 * HOUR, 0],
+    ['Europe/London in GMT (UTC+0)', 'Europe/London', MIDWINTER + 23 * HOUR, 23],
+    ['America/New_York in EDT (UTC-4)', 'America/New_York', MIDSUMMER + 19 * HOUR, 15],
+  ])('is the hour in %s', (_label, zone, at, hour) => {
+    expect(localHour(new Date(at), zone)).toBe(hour)
+  })
+
+  // The day's hours are not 0 to 23 once each on a day the clocks change: the spring one skips an hour and the autumn one repeats one. The instants are the zone's clock changes, worked out by hand.
+  it.each([
+    ['London, the minute before the clocks go forward', 'Europe/London', LONDON_FORWARD - MINUTE, 0],
+    ['London, when they go forward (01:00 becomes 02:00)', 'Europe/London', LONDON_FORWARD, 2],
+    ['London, the minute before they go back (01:59 BST)', 'Europe/London', LONDON_BACK - MINUTE, 1],
+    ['London, when they go back (01:00 GMT)', 'Europe/London', LONDON_BACK, 1],
+    ['London, an hour after they go back', 'Europe/London', LONDON_BACK + HOUR, 2],
+    ['New York, the minute before the clocks go forward', 'America/New_York', NEW_YORK_FORWARD - MINUTE, 1],
+    ['New York, when they go forward (02:00 becomes 03:00)', 'America/New_York', NEW_YORK_FORWARD, 3],
+  ])('is right on a day the clocks change: %s', (_label, zone, at, hour) => {
+    expect(localHour(new Date(at), zone)).toBe(hour)
+  })
+
+  it('throws a RangeError for a zone Intl does not know', () => {
+    expect(() => localHour(new Date(MIDSUMMER), 'Mars/Olympus_Mons')).toThrow(RangeError)
   })
 })
