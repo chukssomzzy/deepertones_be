@@ -12,7 +12,7 @@ export const dayAt = (offset: number): Date => new Date(BASE.getTime() + offset 
 
 // --- the reference -------------------------------------------------------------------------------------------------------------------------------
 
-const rule = (name: string, kind: VerdictRule['kind'], over: Partial<VerdictRule> = {}): VerdictRule => ({ name, aliases: [], kind, rule: `${name} is a ${kind} (test rule)`, source: null, group: null, clashesWith: [], helps: [], ...over })
+const rule = (name: string, kind: VerdictRule['kind'], over: Partial<VerdictRule> = {}): VerdictRule => ({ name, aliases: [], kind, rule: `${name} is a ${kind} (test rule)`, source: null, group: null, clashesWith: [], helps: [], reviewerRole: null, ...over })
 
 /** What the fixture cases are judged by: one rule for each group the floor reads, a banned ingredient with no group, claim phrases and both step-down templates. */
 export const FIXTURE_REFERENCE: VerdictReference = {
@@ -29,6 +29,10 @@ export const FIXTURE_REFERENCE: VerdictReference = {
     rule('parfum', 'allergen', { aliases: ['fragrance'] }),
   ],
   claimPhrases: ['whitening', 'bleaching'],
+  claimWords: [
+    { phrase: 'whitening', sourceUrl: null, reviewerRole: null },
+    { phrase: 'bleaching', sourceUrl: null, reviewerRole: null },
+  ],
   tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' },
 }
 

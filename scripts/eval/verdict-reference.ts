@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto'
 import type { Category, ProductForm } from '../../src/modules/catalog/catalog.vocabulary'
 import { TAPER_KINDS } from '../../src/modules/catalog/catalog.vocabulary'
 import { validateWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
-import { approvedTapersOf, verdictRulesOf, type VerdictReference } from '../../src/modules/catalog/catalog.workbook.service'
+import { approvedTapersOf, verdictClaimWordsOf, verdictRulesOf, type VerdictReference } from '../../src/modules/catalog/catalog.workbook.service'
 import type { ShownConcern } from '../../src/modules/face-scans/face-scans.tables'
 import { readFileBytes, readWorkbookBytes, WorkbookFileError } from '../catalog/xlsx'
 import type { VerdictCase } from './verdict-cases'
@@ -68,15 +68,15 @@ export const loadVerdictReference = async (path: string): Promise<LoadedVerdictR
 
   const sha256 = createHash('sha256').update(bytes).digest('hex')
   const live = workbook.products.filter((product) => product.status !== 'retired')
+  // Draft claim words count as approved here, as draft rules do: the snapshot is the owner's working copy.
+  const claimWords = verdictClaimWordsOf(workbook.claimWords.filter((word) => word.status !== 'retired'))
   return {
     reference: {
       rulesVersion: `snapshot-${sha256.slice(0, 12)}`,
       catalogVersion: file.catalogVersion ?? 0,
       rules: verdictRulesOf(workbook.ingredients.filter((rule) => rule.status !== 'retired')),
-      claimPhrases: workbook.claimWords
-        .filter((word) => word.status !== 'retired')
-        .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
-        .map((word) => word.phrase),
+      claimPhrases: claimWords.map(({ phrase }) => phrase),
+      claimWords,
       tapers,
     },
     sha256,

@@ -315,7 +315,7 @@ const makeViewer = () =>
       // The card says which week, goal and step-down variant it was asked for, so a test reads them off the body and never off a call.
       weekCardFor: async (week: number, goal: Goal, stepDown: boolean) => (world.noWeekCards ? null : { title: `Week ${week} for ${goal}${stepDown ? ' on a step-down' : ''}`, text: `Text for week ${week}.` }),
       guideFor: async (step: RoutineStep, goal: Goal) => structuredClone(world.guides.get(`${step}|${goal}`) ?? world.guides.get(`${step}|`) ?? null),
-      verdictReference: async () => ({ rulesVersion: 'r', catalogVersion: 42, rules: structuredClone(world.rules), claimPhrases: [], tapers: { ...world.tapers } }),
+      verdictReference: async () => ({ rulesVersion: 'r', catalogVersion: 42, rules: structuredClone(world.rules), claimPhrases: [], claimWords: [], tapers: { ...world.tapers } }),
       // The same approved rules, for a viewer that reads them as the live rules (they carry their group either way).
       liveRules: async () => ({ version: 'r', entries: structuredClone(world.rules) }),
       recommendedByCode: async (codes: string[]) => new Map(codes.flatMap((code): [string, RecommendedByCode][] => (world.recommended.has(code) ? [[code, structuredClone(world.recommended.get(code)!)]] : []))),
@@ -1819,7 +1819,7 @@ const T0_DAY = new Date(Date.UTC(T0.getUTCFullYear(), T0.getUTCMonth(), T0.getUT
 const dayText = (date: Date) => date.toISOString().slice(0, 10)
 const dayAt = (days: number) => new Date(T0_DAY.getTime() + days * DAY)
 
-const ruleOf = (name: string, group: IngredientGroup | null, over: Partial<VerdictRule> = {}): VerdictRule => ({ name, aliases: [], kind: 'irritation', rule: `The rule for ${name}.`, source: null, group, clashesWith: [], helps: [], ...over })
+const ruleOf = (name: string, group: IngredientGroup | null, over: Partial<VerdictRule> = {}): VerdictRule => ({ name, aliases: [], kind: 'irritation', rule: `The rule for ${name}.`, source: null, group, clashesWith: [], helps: [], reviewerRole: null, ...over })
 const INGREDIENT_RULES: VerdictRule[] = [
   ruleOf('retinol', 'retinoid', { aliases: ['vitamin a'], kind: 'pregnancy-caution' }),
   ruleOf('glycolic acid', 'exfoliating-acid'),

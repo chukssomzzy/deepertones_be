@@ -782,8 +782,41 @@ describe('CatalogWorkbookService.verdictReference', () => {
       group: 'steroid',
       clashesWith: ['retinoid'],
       helps: ['hd_redness', 'hd_texture'],
+      reviewerRole: 'a consultant dermatologist',
     })
     expect(reference.claimPhrases).toEqual(['bleaching', 'whitening'])
+  })
+
+  // #259 A3: a saved verdict explains itself with the rule's reviewer and source, so the reference carries them. A rule's source link was always `source`.
+  it('gives each approved rule its reviewer role, and each approved claim word its phrase, source link and reviewer role, in code order, without the retired ones', async () => {
+    const built = build()
+    await applied(built.service, (w) => {
+      w.ingredients.rows.push(rule({ code: 'ING-ZZ-ROLE', name: 'zzyzx rolum', reviewer_role: 'a pharmacist', source_url: 'https://example.com/rolum' }))
+      w.claimWords.rows.push(
+        claimWord({ code: 'CLM-B-WHITENING', phrase: 'whitening', reviewer_role: 'a pharmacist', source_url: 'https://example.com/whitening' }),
+        claimWord({ code: 'CLM-A-BLEACHING', phrase: 'bleaching', reviewer_role: 'a consultant dermatologist', source_url: null }),
+        claimWord({ code: 'CLM-OLD', phrase: 'toning', status: 'retired' }),
+      )
+    })
+
+    const reference = await built.service.verdictReference()
+
+    expect(reference.rules.find((r) => r.name === 'zzyzx rolum')).toMatchObject({ reviewerRole: 'a pharmacist', source: 'https://example.com/rolum' })
+    expect(reference.claimWords).toEqual([
+      { phrase: 'bleaching', sourceUrl: null, reviewerRole: 'a consultant dermatologist' },
+      { phrase: 'whitening', sourceUrl: 'https://example.com/whitening', reviewerRole: 'a pharmacist' },
+    ])
+    // The phrases the floor reads are the same words in the same order.
+    expect(reference.claimPhrases).toEqual(reference.claimWords.map(({ phrase }) => phrase))
+  })
+
+  it('gives a null reviewer role, with the property there and not left out, to a rule stored before contract 2.4.0: the seeded rules have none until the team names one', async () => {
+    const { service } = build()
+
+    const { rules } = await service.verdictReference()
+
+    expect(rules.length).toBeGreaterThan(0)
+    for (const read of rules) expect(read, read.name).toHaveProperty('reviewerRole', null)
   })
 
   it('leaves out a draft rule, a retired rule and a retired claim phrase: only what is approved applies', async () => {

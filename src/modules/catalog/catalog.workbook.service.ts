@@ -11,7 +11,7 @@ import { diffWorkbooks, type TabDiff, type WorkbookDiff } from './catalog.workbo
 import { toRawWorkbook } from './catalog.workbook.raw'
 import type { CatalogWorkbookRepository, Country, LiveRules, PlannedProduct, Recommendation, RecommendedByCode, WorkbookChanges } from './catalog.workbook.repository'
 import { nextRulesVersion } from './catalog.workbook.rules-version'
-import { CONTRACT_VERSION, REINTRO_NEVER_BACK, guideKey, reintroductionKey, validateWorkbook, weekKey, type GuideRow, type IngredientRule, type ProductRow, type RawWorkbook, type ScheduleStep, type TaperRow, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
+import { CONTRACT_VERSION, REINTRO_NEVER_BACK, guideKey, reintroductionKey, validateWorkbook, weekKey, type ClaimWordRow, type GuideRow, type IngredientRule, type ProductRow, type RawWorkbook, type ScheduleStep, type TaperRow, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
 import { RawWorkbookSchema } from './catalog.workbook.schemas'
 
 /** A product row that no product of the catalog has the identity of (by identity key or alias): the upload would make it. */
@@ -26,8 +26,14 @@ export const referenceEntriesOf = (rules: readonly Pick<IngredientRule, 'code' |
     .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
     .map((rule) => ({ name: rule.name, aliases: rule.aliases, kind: rule.kind, rule: rule.statement, source: rule.sourceUrl }))
 
-/** An approved rule as the shelf verdict reads it: what the matcher reads, and the metadata only the floor and the fit judge use. */
-export type VerdictRule = ReferenceEntry & { group: IngredientGroup | null; clashesWith: IngredientGroup[]; helps: IngredientRule['helps'] }
+/**
+ * An approved rule as the shelf verdict reads it: what the matcher reads, and the metadata only the floor and the fit judge use. `reviewerRole` (the
+ * Ingredients tab's) is null for a rule stored before contract 2.4.0; `source` is the rule's source link.
+ */
+export type VerdictRule = ReferenceEntry & { group: IngredientGroup | null; clashesWith: IngredientGroup[]; helps: IngredientRule['helps']; reviewerRole: string | null }
+
+/** A lightening claim word as the shelf verdict explains a product named with it: the phrase, and who reviewed it and the source it rests on. */
+export type VerdictClaimWord = { phrase: string; sourceUrl: string | null; reviewerRole: string | null }
 
 /**
  * What the shelf verdict is built against, from one read: the rules version and catalog version that read was at, the approved rules in code order, the approved
@@ -38,6 +44,8 @@ export type VerdictReference = {
   catalogVersion: number
   rules: VerdictRule[]
   claimPhrases: string[]
+  /** The same claim phrases, in the same order, with the source link and reviewer role each is explained with. */
+  claimWords: VerdictClaimWord[]
   tapers: Partial<Record<TaperKind, string>>
 }
 
@@ -57,7 +65,14 @@ export const verdictRulesOf = (rules: readonly IngredientRule[]): VerdictRule[] 
       group: rule.group,
       clashesWith: [...rule.clashesWith],
       helps: [...rule.helps],
+      reviewerRole: rule.reviewerRole,
     }))
+
+/** The claim words as the shelf verdict reads them, in code order, whatever their status (the caller picks which count, as for `verdictRulesOf`). Pure and exported for the same reason. */
+export const verdictClaimWordsOf = (words: readonly Pick<ClaimWordRow, 'code' | 'phrase' | 'sourceUrl' | 'reviewerRole'>[]): VerdictClaimWord[] =>
+  [...words]
+    .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
+    .map(({ phrase, sourceUrl, reviewerRole }) => ({ phrase, sourceUrl, reviewerRole }))
 
 /**
  * For each kind, the code of its approved template that was approved most recently, the lower code when two were approved on the same day; a kind with none is
@@ -247,11 +262,13 @@ export class CatalogWorkbookService {
    */
   async verdictReference(): Promise<VerdictReference> {
     const { catalogVersion, rulesVersion, rules, claimWords, tapers } = await this.repository.readVerdictReference()
+    const approvedWords = verdictClaimWordsOf(claimWords.filter((word) => word.status === 'approved'))
     return {
       rulesVersion,
       catalogVersion,
       rules: verdictRulesOf(rules.filter((rule) => rule.status === 'approved')),
-      claimPhrases: claimWords.filter((word) => word.status === 'approved').map((word) => word.phrase),
+      claimPhrases: approvedWords.map(({ phrase }) => phrase),
+      claimWords: approvedWords,
       tapers: approvedTapersOf(tapers),
     }
   }

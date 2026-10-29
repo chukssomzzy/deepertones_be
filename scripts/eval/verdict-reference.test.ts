@@ -118,6 +118,7 @@ describe('loadVerdictReference', () => {
         group: 'retinoid',
         clashesWith: ['exfoliating-acid'],
         helps: ['hd_texture'],
+        reviewerRole: 'a consultant dermatologist',
       })
       expect(reference.rules.find((r) => r.name === 'glycolic acid')).toMatchObject({ group: 'exfoliating-acid', clashesWith: ['retinoid'], helps: [], source: null })
     })

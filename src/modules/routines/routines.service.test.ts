@@ -399,7 +399,7 @@ beforeEach(() => {
     workbook: {
       countries: async () => structuredClone(world.countries),
       // Where the catalog version a routine records comes from.
-      verdictReference: async () => ({ rulesVersion: 'verdict-rules-7', catalogVersion, rules: [], claimPhrases: [], tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } }),
+      verdictReference: async () => ({ rulesVersion: 'verdict-rules-7', catalogVersion, rules: [], claimPhrases: [], claimWords: [], tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } }),
     } satisfies Pick<CatalogWorkbookService, 'countries' | 'verdictReference'>,
     profiles: {
       find: async (profileId: string) => {

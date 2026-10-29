@@ -76,7 +76,7 @@ const STEROID_SOURCE = 'https://example.org/rules/clobetasol'
 // ---- the world the other services answer from ----
 
 type Rule = VerdictReference['rules'][number]
-const rule = (over: Partial<Rule> & Pick<Rule, 'name' | 'kind'>): Rule => ({ aliases: [], rule: `${over.name} (test rule)`, source: null, group: null, clashesWith: [], helps: [], ...over })
+const rule = (over: Partial<Rule> & Pick<Rule, 'name' | 'kind'>): Rule => ({ aliases: [], rule: `${over.name} (test rule)`, source: null, group: null, clashesWith: [], helps: [], reviewerRole: null, ...over })
 
 const taperRow = (code: string, kind: TaperKind, status: TaperRow['status'] = 'approved'): TaperRow => ({
   code,
@@ -152,6 +152,7 @@ const newWorld = (): World => ({
       rule({ name: 'hydroquinone', kind: 'restricted-substance', group: 'lightening-agent', source: 'https://example.org/rules/hydroquinone' }),
     ],
     claimPhrases: ['whitening'],
+    claimWords: [{ phrase: 'whitening', sourceUrl: 'https://example.org/claims/whitening', reviewerRole: 'a pharmacist' }],
     tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' },
   },
   goal: 'fade-dark-marks',

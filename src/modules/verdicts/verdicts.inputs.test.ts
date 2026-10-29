@@ -42,6 +42,7 @@ const ruleOf = (over: Partial<VerdictReference['rules'][number]> & Pick<VerdictR
   group: null,
   clashesWith: [],
   helps: [],
+  reviewerRole: null,
   ...over,
 })
 
@@ -61,6 +62,10 @@ const REFERENCE: VerdictReference = {
   catalogVersion: 12,
   rules: RULES,
   claimPhrases: ['whitening', 'toning'],
+  claimWords: [
+    { phrase: 'whitening', sourceUrl: 'https://example.org/claims/whitening', reviewerRole: 'a pharmacist' },
+    { phrase: 'toning', sourceUrl: null, reviewerRole: null },
+  ],
   tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' },
 }
 
