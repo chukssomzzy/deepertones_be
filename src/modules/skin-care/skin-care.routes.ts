@@ -1,6 +1,6 @@
 import { defineRoute, documentedOnly, errorResponses, jsonBody, ok, openapiApp, readJsonBody, success } from '../../lib/openapi'
 import { signedIn } from '../../middleware/signed-in'
-import { CheckInBody, CheckInResponse, LogSkinBody, LogSkinResponse, PauseParams, SkinLogsResponse, UndoPauseResponse } from './skin-care.schemas'
+import { CheckInBody, CheckInResponse, CloseHoldBody, CloseHoldResponse, LogSkinBody, LogSkinResponse, PauseParams, SkinLogsResponse, UndoPauseResponse } from './skin-care.schemas'
 
 const bearer = [{ bearerAuth: [] }]
 
@@ -60,7 +60,7 @@ const checkIn = defineRoute({
   description:
     'The answer to the check-in on a pause, from its check day on (409 `CHECK_IN_NOT_DUE` before it). `calmer` on a step brings it back on a gentle ladder: the pause becomes `bringing-back`, the routine shows the step on ' +
     'its first rung and an inbox row says so; on the check-in with no step it ends. `same` keeps the step paused and asks again three days from today, and the third `same` in a row goes to a professional. ' +
-    '`worse` goes to a professional. A professional result sets the pause to `escalated`: it is never asked again and the routine keeps the step out. `response` is the reviewed text with `{step}` filled, or the ' +
+    '`worse` goes to a professional. While an escalation hold is open, `calmer` and `same` on a step the hold keeps out are 409 `HOLD_OPEN` (503 `ROUTINE_UNAVAILABLE` if the routine cannot be read, so it cannot be told); close the hold first. A professional result sets the pause to `escalated`: it is never asked again and the routine keeps the step out. `response` is the reviewed text with `{step}` filled, or the ' +
     'reviewed professional text. A reviewed text or ladder the team has not written is 503 `CONTENT_UNAVAILABLE`, and the pause is as it was. 400 `VALIDATION_FAILED` for any other answer. ' +
     '404 `PAUSE_NOT_FOUND` for another account\'s pause, an id nobody holds, and a pause that is not `paused`. 401 without a session and 403 `SIGNUP_REQUIRED` for a guest, both before the body is read.',
   security: bearer,
@@ -72,6 +72,26 @@ const checkIn = defineRoute({
 // The check-in is documented with its body but served from a copy without it, so an empty or malformed body is VALIDATION_FAILED (@hono/zod-openapi would answer HTTP_400).
 const checkInServed = { ...checkIn, request: { params: PauseParams }, hide: true }
 
+const closeHold = defineRoute({
+  method: 'post',
+  path: '/skin-care/hold/close',
+  operationId: 'closeEscalationHold',
+  tags: ['Skin care'],
+  summary: 'Close the escalation hold',
+  description:
+    'A professional result (a red-flag log, a harm log with two steps already paused, a worse or unchanged check-in) keeps the steps with an active ingredient out of the routine as `held`, until the person ' +
+    'closes the hold: `seen` (they saw a professional) or `settled` (the skin has settled). Each held step is then due a check-in the same day: an escalated pause is `paused` again (its "about the same" count cleared), ' +
+    'an open pause is due today, a step being brought back is paused again (its ladder is kept, and Calmer starts it again at the first rung), and a held step with no pause gets one (it cannot be undone). `checkInsDue` lists what is due today. ' +
+    '503 `ROUTINE_UNAVAILABLE` when the routine cannot be read (which steps are held is then unknown): the hold stays open and the request can be repeated. 404 `HOLD_NOT_FOUND` for an account with no open hold, and for the second of two closes. 400 `VALIDATION_FAILED` for any other body. 401 without a session and 403 `SIGNUP_REQUIRED` for a guest, both before the body is read.',
+  security: bearer,
+  middleware: [signedIn()],
+  request: { body: jsonBody(CloseHoldBody) },
+  responses: { 200: success(CloseHoldResponse, 'The hold, closed, and the check-ins due today'), ...errorResponses(400, 401, 403, 404, 503) },
+})
+
+// Documented with its body, served from a copy without it, as the check-in is.
+const closeHoldServed = { ...closeHold, request: {}, hide: true }
+
 export const skinCareRoutes = openapiApp()
   .openapi(postSkinLog, async (c) => ok(c, await c.var.services.skinCare.log(c.req.valid('json')), 'Skin log saved'))
   .openapi(getSkinLogs, async (c) => ok(c, { logs: await c.var.services.skinCare.recent() }, 'Skin logs'))
@@ -82,5 +102,11 @@ export const skinCareRoutes = openapiApp()
     const { answer } = readJsonBody(await c.req.text(), CheckInBody)
     return ok(c, await c.var.services.skinCare.answerCheckIn(c.req.valid('param').id, answer), 'Check-in answered')
   })
+  .openapi(closeHoldServed, async (c) => {
+    c.var.services.skinCare.requireSignedUp()
+    const { how } = readJsonBody(await c.req.text(), CloseHoldBody)
+    return ok(c, await c.var.services.skinCare.closeHold(how), 'Hold closed')
+  })
 
 skinCareRoutes.openAPIRegistry.registerPath(documentedOnly(checkIn))
+skinCareRoutes.openAPIRegistry.registerPath(documentedOnly(closeHold))

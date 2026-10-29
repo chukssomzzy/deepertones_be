@@ -1,5 +1,5 @@
 import type { Frequency, IngredientGroup, RoutineStep } from '../catalog/catalog.vocabulary'
-import type { skinLogs, stepPauses } from './skin-care.table'
+import type { escalationHolds, skinLogs, stepPauses } from './skin-care.table'
 import type { SkinCareProductRef } from './skin-care.vocabulary'
 
 export type { SkinCareProductRef }
@@ -30,9 +30,13 @@ export type SkinCareRoutine = {
   stepDownRunning: boolean
 }
 
-/** What skin-care says about a profile on a local day: the pauses that change an entry's place in the routine, and whether an escalation hold is open. */
+/**
+ * What skin-care says about a profile on a local day: the pauses that change an entry's place in the routine, and whether an escalation hold is open. A step being brought back also says
+ * which rung it is on (`rung`, counting from 1) and how many rungs there are before it is back (`of`), for the line "step n of m". A paused step says which pause it is (`pauseId`) and
+ * the day it is checked (`checkDay`), for the line "we'll ask on {day}".
+ */
 export type SkinCareState = {
-  pauses: { step: RoutineStep; productId: string; state: 'paused' | 'bringing-back'; frequency?: Frequency; anchor?: string }[]
+  pauses: { step: RoutineStep; productId: string; state: 'paused' | 'bringing-back'; frequency?: Frequency; anchor?: string; rung?: number; of?: number; pauseId?: string; checkDay?: string }[]
   held: boolean
 }
 
@@ -45,3 +49,8 @@ export type StepPause = typeof stepPauses.$inferSelect
 
 /** A pause as the service makes it: the caller makes the id and the time, and every column is given. */
 export type NewStepPause = StepPause
+
+export type EscalationHold = typeof escalationHolds.$inferSelect
+
+/** A hold as the service makes it: the caller makes the id and the times, and a new hold is open. */
+export type NewEscalationHold = Omit<EscalationHold, 'closedAt' | 'closedHow'>

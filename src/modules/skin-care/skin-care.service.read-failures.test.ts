@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runAs } from '../../lib/context'
 import type { Escalation, Response } from '../catalog/catalog.workbook.service'
+import { FakeEscalationHoldsRepository } from './skin-care.holds.repository.fake'
 import { FakeStepPausesRepository } from './skin-care.pauses.repository.fake'
 import { FakeSkinCareRepository } from './skin-care.repository.fake'
 import { SkinCareService } from './skin-care.service'
@@ -45,6 +46,10 @@ const makeService = (store: FakeStepPausesRepository = pauses) =>
   new SkinCareService({
     repository,
     pauses: store,
+    holds: new FakeEscalationHoldsRepository(),
+    safety: { markReactionProduct: async () => ({ marked: false }) },
+    verdicts: { savedFor: async () => null },
+    catalog: { namedProduct: async () => Promise.reject(new Error('unused')) },
     workbook: {
       responseFor: async (outcome) => (outcome === 'paused' ? PAUSED : outcome === 'nothing-to-pause' ? NOTHING : outcome === 'advice-itching' ? ADVICE : null),
       escalationFor: async (reason) => (reason === 'swelling' ? SWELLING : reason === 'harm-while-two-paused' ? TWO_PAUSED : null),
@@ -365,9 +370,9 @@ describe('SkinCareService.stateFor, healing a rebuild whose hook was missed', ()
   })
 
   it('keeps and lists a pause that is still in the routine', async () => {
-    await log(STING)
+    const result = await log(STING)
 
-    expect((await service.stateFor(AMARA, '2030-06-15')).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused' }])
+    expect((await service.stateFor(AMARA, '2030-06-15')).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: result.paused!.id, checkDay: '2030-06-18' }])
   })
 
   it('reads the routine only when there is a pause with a step to check', async () => {
@@ -377,11 +382,11 @@ describe('SkinCareService.stateFor, healing a rebuild whose hook was missed', ()
   })
 
   it('is not fatal when the routine cannot be read: the pauses are still answered, and the failure is logged by ids', async () => {
-    await log(STING)
+    const result = await log(STING)
     routineFails = true
     errors = []
 
-    expect((await service.stateFor(AMARA, '2030-06-15')).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused' }])
+    expect((await service.stateFor(AMARA, '2030-06-15')).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: result.paused!.id, checkDay: '2030-06-18' }])
     expect(errors).toEqual([[...idsLine('skin-care-reconcile-failed')]])
   })
 

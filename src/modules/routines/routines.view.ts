@@ -1,5 +1,6 @@
 import type { z } from '@hono/zod-openapi'
 import type { ProductSummary } from '../catalog/catalog.service'
+import { daysBetween, dueOnDay } from '../catalog/catalog.frequency'
 import { FREQUENCY_STRENGTH, ROUTINE_STEPS, type Frequency, type ProductForm } from '../catalog/catalog.vocabulary'
 import type { RecommendedByCode } from '../catalog/catalog.workbook.repository'
 import type { CountryRow, TaperRow } from '../catalog/catalog.workbook.schema'
@@ -13,7 +14,7 @@ type PublicEntry = RoutineBody['morning'][number]
 type PublicProduct = PublicEntry['product']
 
 /** What the skin-care state does to a step of the routine: its status on the screen, and for a step being brought back the rung's frequency and the day the rung's count starts. A step with none is active. */
-export type StepOverlay = { status: Exclude<PublicEntry['status'], 'active'>; frequency?: Frequency; anchor?: string }
+export type StepOverlay = { status: Exclude<PublicEntry['status'], 'active'>; frequency?: Frequency; anchor?: string; rung?: number; of?: number }
 
 /** Everything the routine screen is made of, read by the viewer service and handed over: a stored version and the reads around it. */
 export type RoutineViewInput = {
@@ -247,6 +248,38 @@ export const toReminderPlan = (input: RoutineViewInput): ReminderPlan | null => 
     return [{ step: step.step, title: titleOf(step, input).title, frequency: frequencyOf(step, input), ...(rung?.anchor === undefined ? {} : { anchor: rung.anchor }) }]
   })
   return { dayOne: dayString(utcDay(version.startedOn)), morning: entries.filter(inMorning), evening: entries.filter(inEvening), stepDownChanges: stepDownChangesOf(input) }
+}
+
+/** An entry of Today's list: the routine's entry as the screen shows it, without `changed`, and never a paused or held step. */
+export type TodayEntry = Omit<PublicEntry, 'changed' | 'status'> & { status: 'active' | 'bringing-back' }
+
+/**
+ * The entries due on `day` (a local day, 'YYYY-MM-DD') in the morning and in the evening, in routine order. A paused or held step is left out. The evening list holds only what is due that day,
+ * counted from day 1 or, for a step being brought back, from its rung's first day: the same arithmetic the reminders use. A started routine's day 1 is its `startedOn`; null gives none.
+ */
+export const toTodayLists = (input: RoutineViewInput, day: string): { morning: TodayEntry[]; evening: TodayEntry[] } => {
+  const { startedOn } = input.version
+  if (startedOn === null) return { morning: [], evening: [] }
+  const dayOne = dayString(utcDay(startedOn))
+  const ordered = [...input.version.steps].sort((a, b) => ROUTINE_STEPS.indexOf(a.step) - ROUTINE_STEPS.indexOf(b.step))
+  const morning: TodayEntry[] = []
+  const evening: TodayEntry[] = []
+  for (const step of ordered) {
+    const over = input.overlay?.get(step)
+    if (over?.status === 'paused' || over?.status === 'held') continue
+    const frequency = frequencyOf(step, input)
+    const { changed: _changed, status, ...entry } = entryOf(step, null, input)
+    const shown: TodayEntry = { ...entry, status: status === 'bringing-back' ? 'bringing-back' : 'active' }
+    if (inMorning({ step: step.step, frequency })) morning.push(shown)
+    if (inEvening({ step: step.step, frequency }) && dueOnDay(frequency, rungOf(step, input)?.anchor ?? dayOne, day)) evening.push(shown)
+  }
+  return { morning, evening }
+}
+
+/** The week of the plan on `day`: days 1 to 7 are week 1, and so on with no cap. Null before day 1. */
+export const weekOf = (dayOne: string, day: string): number | null => {
+  const since = daysBetween(dayOne, day)
+  return since < 0 ? null : Math.floor(since / WEEK_DAYS) + 1
 }
 
 /** The title a step shows on the screen. */
