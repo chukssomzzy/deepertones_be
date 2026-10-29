@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "03e4bd9e-bd50-4dda-8d51-ce37c0eaeedc",
+  "id": "a85062b5-800e-4d5b-9c6d-f5ecc60463a8",
   "prevId": "4d094b4c-0f4a-40d6-95a5-069e50595891",
   "tables": {
     "job_runs": {
@@ -3721,14 +3721,6 @@
           ],
           "isUnique": false,
           "where": "\"routine_versions\".\"writer_retry_due_at\" IS NOT NULL"
-        },
-        "routine_versions_started_idx": {
-          "name": "routine_versions_started_idx",
-          "columns": [
-            "profile_id"
-          ],
-          "isUnique": false,
-          "where": "\"routine_versions\".\"started_on\" IS NOT NULL"
         }
       },
       "foreignKeys": {
@@ -4766,6 +4758,95 @@
         "profile_products_profile_id_profiles_id_fk": {
           "name": "profile_products_profile_id_profiles_id_fk",
           "tableFrom": "profile_products",
+          "tableTo": "profiles",
+          "columnsFrom": [
+            "profile_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "escalation_holds": {
+      "name": "escalation_holds",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "profile_id": {
+          "name": "profile_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_log_id": {
+          "name": "source_log_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "opened_on": {
+          "name": "opened_on",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "opened_at": {
+          "name": "opened_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "closed_at": {
+          "name": "closed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "closed_how": {
+          "name": "closed_how",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "escalation_holds_open_profile_unique": {
+          "name": "escalation_holds_open_profile_unique",
+          "columns": [
+            "profile_id"
+          ],
+          "isUnique": true,
+          "where": "\"escalation_holds\".\"closed_at\" IS NULL"
+        }
+      },
+      "foreignKeys": {
+        "escalation_holds_profile_id_profiles_id_fk": {
+          "name": "escalation_holds_profile_id_profiles_id_fk",
+          "tableFrom": "escalation_holds",
           "tableTo": "profiles",
           "columnsFrom": [
             "profile_id"

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Actor, runAs } from '../../lib/context'
 import { ConflictError } from '../../lib/errors'
+import { localDay } from '../../lib/local-day'
 import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import type { ProductCatalogService, ProductSummary, ShelfFacts } from '../catalog/catalog.service'
 import type { Frequency, IngredientGroup, RoutineStep } from '../catalog/catalog.vocabulary'
@@ -16,6 +17,11 @@ import type { Candidate } from '../recommendations/recommendations.types'
 import type { SafetyService } from '../safety/safety.service'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
+import { FakeInboxRepository } from '../inbox/inbox.repository.fake'
+import { InboxService } from '../inbox/inbox.service'
+import type { StepPause } from '../skin-care/skin-care.types'
+import { FakeRoutineCheckInsRepository } from './routines.check-ins.repository.fake'
+import { RoutineCheckInsService } from './routines.check-ins.service'
 import { FakeRoutinesRepository } from './routines.repository.fake'
 import { FORBIDDEN_WORDING } from './routines.wording'
 import type { RoutineVersionRow } from './routines.repository'
@@ -55,8 +61,36 @@ import { RoutineViewerService } from './routines.viewer.service'
 // #217 PR 2 adds a sixth session method, lookFor(step): Promise<LookForResponse> (screens 4.7 and 4.8; its contract is pinned at the foot of this file), and three
 // reads the world fake below answers: workbook.guideFor(step, goal), recommendations.candidatesFor({ step }) (the session's own: it reads the actor, so the viewer
 // passes no profile id) and safety.currentOrNull() (a new `safety` dep, for the pregnancy and breastfeeding answer).
-// The gates, in order, for all six session methods: 401, 403 SIGNUP_REQUIRED (a guest), 409 GOAL_REQUIRED, 503 VERDICT_UNAVAILABLE (either step-down template of
+// The gates, in order, for all session methods (six, and #233's `today`): 401, 403 SIGNUP_REQUIRED (a guest), 409 GOAL_REQUIRED, 503 VERDICT_UNAVAILABLE (either step-down template of
 // the verdict not approved). Note the order: the verdict itself answers 503 before 409; the routine answers 409 before 503.
+
+// #233 PR 7: GET /me/today, `RoutineViewerService.today()` (the foot of this file). THE RESPONSE SHAPE THESE TESTS PIN (the brief asked for a proposal):
+//
+//   TodayBody = {
+//     started: boolean                    the routine in force has a day 1 (Start was tapped). False with no routine, with a pending one (a safety change hides it) and with one not Started.
+//     day: string                         the person's local day, 'YYYY-MM-DD' (the stored zone's, else UTC; a zone Intl cannot use is UTC too).
+//     startsOn: string | null             day 1, 'YYYY-MM-DD', when there is one. Start makes tomorrow day 1, so on the day of the tap it is ahead of `day`.
+//     week: number | null                 counted from day 1: days 1-7 are week 1, 8-14 week 2, and on without a cap (week 13+ is just a larger number). Null before day 1 and when not started.
+//     card: { title: string; text: string } | null    CatalogWorkbookService.weekCardFor(week, goal, aStepDownIsRunning); null before day 1 and when the team has approved no card for the week.
+//     half: 'morning' | 'evening'         the half of the local day it is: morning before 15:00 local, evening from 15:00 (fixed; never the evening reminder time).
+//     current: { done: boolean; entries: TodayEntry[] }   the current half's due entries, in routine order, and whether the person ticked that half off today.
+//     other: { done: boolean; entries: TodayEntry[] }     the same for the other half of the day.
+//     allDone: boolean                    both halves done today.
+//     stepDowns: { entryId: string; title: string; step: number; of: number; line: string }[]   each RUNNING dated step-down: line is 'Step-down: step n of m'. One that has finished is gone.
+//     checkInsDue: { pauseId: string; step: RoutineStep | null; title: string | null; checkDay: string }[]   SkinCareService.checkInsDue, the stepless one included; title is the routine's own for the step.
+//     hold: { title: 'See a professional' } | null     non-null while skin-care says `held`.
+//     bringingBack: { step: RoutineStep; title: string; rung: number; of: number; line: string }[]   each step on a rung; line is 'Bringing back {title}: step n of m'. Listed on its rest days too.
+//     remindersOff: boolean               reminders are not enabled.
+//     inbox: { unread: number; latest: InboxItemView[] }  InboxService.summaryFor.
+//   }
+//   TodayEntry = the entry GET /me/routine answers ({ step, title, when, reason, product, ... }), without `changed`; `status` is 'active' or 'bringing-back' only.
+//   Not started: the same keys, with week null, card null, no entries (done false), allDone false, no stepDowns and no bringingBack; hold, checkInsDue, remindersOff and inbox are still read, since a
+//   red flag can be logged before Start and must not be hidden.
+// What the module needs beyond today's deps (the world fake below answers them): `workbook.weekCardFor`; `skinCare.checkInsDue(profileId, today)` beside `stateFor`; `reminders.enabledFor(profileId)` beside
+// `zoneFor`; `inbox: Pick<InboxService, 'summaryFor'>`; `checkIns: Pick<RoutineCheckInsRepository, 'list'>` (done flags); and the production `SkinCareState` pauses gain `rung` and `of` for a step being brought
+// back (the ladder's rung number and length), which `stateFor` cannot say today. Gates, the same as GET /me/routine's (`gatedWithGoal`): 401, 403 SIGNUP_REQUIRED for a guest, 409 GOAL_REQUIRED, 503 VERDICT_UNAVAILABLE, so a hold or a due check-in
+// does not show until there is a goal (SESSION_METHODS pins the four; the `today` describe pins that nothing of skin-care is read behind a refused gate). The week card is asked for the person's CURRENT goal
+// (`goals.requireGoal` / `goalFor`, as lookFor reads it), not the goal the routine in force was built for.
 
 // The one clock every test hangs off; later times are offsets from it.
 const T0 = new Date('2030-06-15T12:00:00.000Z')
@@ -172,7 +206,8 @@ type SkinCareRoutine = {
   stepDownRunning: boolean
 }
 type SkinCareState = {
-  pauses: { step: RoutineStep; productId: string; state: 'paused' | 'bringing-back'; frequency?: Frequency; anchor?: string }[]
+  /** `rung` and `of` (PR 7) are the ladder's current rung and its length, for a step being brought back; `pauseId` and `checkDay` name a paused step's pause and the day it is checked. */
+  pauses: { step: RoutineStep; productId: string; state: 'paused' | 'bringing-back'; frequency?: Frequency; anchor?: string; rung?: number; of?: number; pauseId?: string; checkDay?: string }[]
   held: boolean
 }
 
@@ -200,6 +235,12 @@ type World = {
   skinCare: SkinCareState
   /** The time zone stored with the profile's reminder settings; null is UTC. */
   zone: string | null
+  /** The reminder settings that are not the zone: whether they are on, and the evening time (which Today must not use to split the day). */
+  reminders: { enabled: boolean; evening: string }
+  /** The check-ins skin-care says are due (the rows it holds); the stepless one has no step. */
+  checkInsDue: StepPause[]
+  /** When true the team has approved no week card, so `weekCardFor` answers null. */
+  noWeekCards: boolean
 }
 
 const newWorld = (): World => ({
@@ -235,6 +276,9 @@ const newWorld = (): World => ({
   rules: [],
   skinCare: { pauses: [], held: false },
   zone: null,
+  reminders: { enabled: false, evening: '21:00' },
+  checkInsDue: [],
+  noWeekCards: false,
 })
 
 let world: World
@@ -246,6 +290,11 @@ let routinesEnabled: boolean
 let routines: { [K in 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale']: ReturnType<typeof vi.fn> }
 let requireGoal: ReturnType<typeof vi.fn>
 let stateFor: ReturnType<typeof vi.fn<(profileId: string, today: string) => Promise<SkinCareState>>>
+let checkInsDue: ReturnType<typeof vi.fn<(profileId: string, today: string) => Promise<StepPause[]>>>
+let checkInsRepository: FakeRoutineCheckInsRepository
+let inboxRepository: FakeInboxRepository
+let inbox: InboxService
+let inboxIds: number
 
 const setClock = (offsetMs: number) => {
   clock = at(offsetMs)
@@ -261,8 +310,10 @@ const showing = async (row: RoutineVersionRow, status: 'ready' | 'updating' = 'r
 const makeViewer = () =>
   new RoutineViewerService({
     routines: routines as unknown as Pick<RoutineService, 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale'>,
-    goals: { requireGoal } as unknown as Pick<GoalsService, 'requireGoal'>,
+    goals: { requireGoal, goalFor: async () => world.goal } as unknown as Pick<GoalsService, 'requireGoal' | 'goalFor'>,
     workbook: {
+      // The card says which week, goal and step-down variant it was asked for, so a test reads them off the body and never off a call.
+      weekCardFor: async (week: number, goal: Goal, stepDown: boolean) => (world.noWeekCards ? null : { title: `Week ${week} for ${goal}${stepDown ? ' on a step-down' : ''}`, text: `Text for week ${week}.` }),
       guideFor: async (step: RoutineStep, goal: Goal) => structuredClone(world.guides.get(`${step}|${goal}`) ?? world.guides.get(`${step}|`) ?? null),
       verdictReference: async () => ({ rulesVersion: 'r', catalogVersion: 42, rules: structuredClone(world.rules), claimPhrases: [], tapers: { ...world.tapers } }),
       // The same approved rules, for a viewer that reads them as the live rules (they carry their group either way).
@@ -270,7 +321,7 @@ const makeViewer = () =>
       recommendedByCode: async (codes: string[]) => new Map(codes.flatMap((code): [string, RecommendedByCode][] => (world.recommended.has(code) ? [[code, structuredClone(world.recommended.get(code)!)]] : []))),
       tapersByCode: async (codes: string[]) => new Map(codes.flatMap((code): [string, TaperRow][] => (code === TEMPLATE.code ? [[code, structuredClone(TEMPLATE)]] : []))),
       countries: async () => structuredClone(world.countries),
-    } as unknown as Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries' | 'guideFor' | 'liveRules'>,
+    } as unknown as Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries' | 'guideFor' | 'liveRules' | 'weekCardFor'>,
     catalog: {
       shelfFacts: async (ids: string[]) => new Map(ids.flatMap((id): [string, ShelfFacts][] => (world.facts.has(id) ? [[id, structuredClone(world.facts.get(id)!)]] : []))),
       productSummaries: async (ids: string[]) => new Map(ids.flatMap((id): [string, ProductSummary][] => (world.summaries.has(id) ? [[id, structuredClone(world.summaries.get(id)!)]] : []))),
@@ -286,8 +337,17 @@ const makeViewer = () =>
       // As SafetyService.view has it: pregnant or breastfeeding ticked is excludesPregnancyCaution.
       currentOrNull: async () => ({ choices: [...world.safetyChoices], excludesPregnancyCaution: world.safetyChoices.includes('pregnant') || world.safetyChoices.includes('breastfeeding') }),
     } as unknown as Pick<SafetyService, 'currentOrNull'>,
-    skinCare: { stateFor },
-    reminders: { zoneFor: async () => world.zone } as unknown as Pick<RemindersService, 'zoneFor'>,
+    skinCare: { stateFor, checkInsDue },
+    reminders: {
+      zoneFor: async () => world.zone,
+      enabledFor: async () => world.reminders.enabled,
+      // The one read Today makes of the settings it needs: the zone, and whether reminders are on.
+      zoneAndEnabledFor: async () => ({ zone: world.zone, enabled: world.reminders.enabled }),
+      // The session's own settings, as RemindersService.settings answers them: here only so a viewer that reads the evening time from them is caught splitting the day by it.
+      settings: async () => ({ enabled: world.reminders.enabled, morning: '07:00', evening: world.reminders.evening, timeZone: world.zone, stepDownAlerts: true, missedDaysNudge: true, missedDaysChannel: 'push' }),
+    } as unknown as Pick<RemindersService, 'zoneFor' | 'enabledFor' | 'zoneAndEnabledFor' | 'settings'>,
+    checkIns: checkInsRepository,
+    inbox,
     repository,
     events,
     enabled: routinesEnabled,
@@ -324,6 +384,11 @@ beforeEach(() => {
     return { goal: world.goal }
   })
   stateFor = vi.fn(async (_profileId: string, _today: string) => structuredClone(world.skinCare))
+  checkInsDue = vi.fn(async (_profileId: string, _today: string) => structuredClone(world.checkInsDue))
+  checkInsRepository = new FakeRoutineCheckInsRepository()
+  inboxRepository = new FakeInboxRepository()
+  inboxIds = 0
+  inbox = new InboxService({ repository: inboxRepository, now: () => clock, newId: () => `inbox-${++inboxIds}` })
   viewer = makeViewer()
 })
 
@@ -350,6 +415,8 @@ const SESSION_METHODS: [string, () => Promise<unknown>][] = [
   ['gotIt', () => viewer.gotIt('treat', IP)],
   ['findSoldHere', () => viewer.findSoldHere('moisturise')],
   ['lookFor', () => viewer.lookFor('treat')],
+  // #233 PR 7: Today has the same gates as the rest (the owner's decision): 401, 403, 409 GOAL_REQUIRED, 503 VERDICT_UNAVAILABLE.
+  ['today', () => (viewer as unknown as { today(): Promise<unknown> }).today()],
 ]
 const touched = () => [...Object.values(routines)].some((fn) => fn.mock.calls.length > 0)
 
@@ -2272,5 +2339,772 @@ describe('RoutineViewerService.reminderPlanFor: the skin-care overlay', () => {
 
     expect((await plan())!.stepDownChanges).toEqual(without)
     expect(without).toHaveLength(3)
+  })
+})
+
+// ---- #233 PR 7: GET /me/today (RoutineViewerService.today) ----
+// The shape is documented in the header block above. The clock is the file's T0 (2030-06-15 12:00Z): day N of the routine is `dayAt(N)`, since Start's day 1 is START_DAY, the day after T0's. Every
+// instant below is a UTC time on such a day, so a zone's offset is worked out from the zone, never read off a clock the test shares with the code under test.
+// Left unpinned on purpose: a failing inbox read (the brief says only skin-care fails the read closed), an entry-less half counting as done, and the order of check-ins due.
+describe('RoutineViewerService.today', () => {
+  type Today = Record<string, any>
+  const today = (): Promise<Today> => body(asVerified(() => (viewer as unknown as { today(): Promise<unknown> }).today()))
+  /** The routine Started with day 1 on START_DAY, as Start leaves it. */
+  const started = (over: Partial<RoutineVersionRow> = {}) => showing(versionRow({ startedOn: START_DAY, ...over }))
+  /** Sets the clock to `hh:mm` UTC on day `n` of the routine (n = 0 is the day of T0). */
+  const atUtc = (n: number, hh: number, mm = 0) => {
+    clock = new Date(dayAt(n).getTime() + hh * HOUR + mm * MINUTE)
+  }
+  const stepsOf = (list: { entries: any[] }): string[] => list.entries.map((entry) => entry.step)
+  /** The morning or evening list of a body, whichever of `current` and `other` it is. */
+  const listOf = (response: Today, half: 'morning' | 'evening') => (response.half === half ? response.current : response.other)
+  const stepsIn = (response: Today, half: 'morning' | 'evening') => stepsOf(listOf(response, half))
+  const pauseRow = (over: Partial<StepPause> = {}): StepPause => ({
+    id: 'pause-1',
+    profileId: PROFILE,
+    step: 'treat',
+    productKey: 'product-SERUM-1',
+    productId: 'product-SERUM-1',
+    productRef: { kind: 'candidate', code: 'SERUM-1' },
+    ingredientGroup: 'retinoid',
+    state: 'paused',
+    pausedOn: dayText(dayAt(1)),
+    checkDay: dayText(dayAt(4)),
+    sameCount: 0,
+    sourceLogId: null,
+    ladderCode: null,
+    ladderStartedOn: null,
+    versionId: null,
+    createdAt: T0,
+    ...over,
+  })
+
+  const NOT_STARTED = {
+    started: false,
+    day: dayText(T0_DAY),
+    startsOn: null,
+    week: null,
+    card: null,
+    half: 'morning',
+    current: { done: false, entries: [] },
+    other: { done: false, entries: [] },
+    allDone: false,
+    stepDowns: [],
+    checkInsDue: [],
+    hold: null,
+    bringingBack: [],
+    paused: [],
+    remindersOff: true,
+    inbox: { unread: 0, latest: [] },
+  }
+
+  describe('who may ask, and what it reads', () => {
+    it('refuses a guest with 403 SIGNUP_REQUIRED before reading anything', async () => {
+      const error = await errorOf(asGuest(() => (viewer as unknown as { today(): Promise<unknown> }).today()))
+
+      expect(error).toMatchObject({ name: 'ForbiddenError', code: 'SIGNUP_REQUIRED' })
+      expect(touched()).toBe(false)
+      expect(stateFor).not.toHaveBeenCalled()
+      expect(checkInsDue).not.toHaveBeenCalled()
+    })
+
+    it('refuses a signed-up account with no goal with 409 GOAL_REQUIRED, and reads nothing of skin-care: a hold or a due check-in does not show until there is a goal', async () => {
+      world.goal = null
+      world.skinCare = { pauses: [], held: true }
+      world.checkInsDue = [pauseRow()]
+
+      const error = await errorOf(asVerified(() => (viewer as unknown as { today(): Promise<unknown> }).today()))
+
+      expect(error).toMatchObject({ name: 'ConflictError', code: 'GOAL_REQUIRED' })
+      expect(stateFor).not.toHaveBeenCalled()
+      expect(checkInsDue).not.toHaveBeenCalled()
+    })
+
+    it('refuses with 503 VERDICT_UNAVAILABLE while a step-down template of the verdict is not approved, as the routine read does, and reads nothing of skin-care', async () => {
+      world.tapers = { steroid: 'TPR-STEROID-1' }
+
+      const error = await errorOf(asVerified(() => (viewer as unknown as { today(): Promise<unknown> }).today()))
+
+      expect(error).toMatchObject({ name: 'UnavailableError', code: 'VERDICT_UNAVAILABLE' })
+      expect(stateFor).not.toHaveBeenCalled()
+      expect(checkInsDue).not.toHaveBeenCalled()
+    })
+
+    it('asks for no build and marks nothing served: it only reads', async () => {
+      await started()
+
+      await today()
+
+      expect(routines.request).not.toHaveBeenCalled()
+      expect(routines.requestIfStale).not.toHaveBeenCalled()
+      expect((await repository.current(PROFILE))!.servedAt).toBeNull()
+    })
+  })
+
+  describe('before there is a day to show', () => {
+    it('is the not-started body when there is no routine yet: every key present, nothing due', async () => {
+      expect(await today()).toEqual(NOT_STARTED)
+    })
+
+    it('is the not-started body for a ready routine that was never Started, however many steps it holds', async () => {
+      await showing(versionRow())
+
+      expect(await today()).toEqual(NOT_STARTED)
+    })
+
+    it('shows no week, no card and no entries on the day Start was tapped (day 1 is tomorrow), but says it has started and when', async () => {
+      await started()
+
+      expect(await today()).toEqual({ ...NOT_STARTED, started: true, startsOn: dayText(START_DAY) })
+    })
+
+    it('still shows a hold, a check-in that is due, the reminders banner and the inbox when the routine is hidden (pending): none of them waits for a routine', async () => {
+      world.skinCare = { pauses: [], held: true }
+      world.checkInsDue = [pauseRow({ id: 'pause-nothing', step: null, productKey: '', productId: null, productRef: { kind: 'none' }, ingredientGroup: null })]
+      world.reminders.enabled = true
+      atUtc(3, 9)
+      await inbox.write({ profileId: PROFILE, kind: 'paused', day: dayText(dayAt(3)), title: 'We paused a step', body: 'Your skin needs a rest.', link: '/routine', key: 'paused:pause-nothing' })
+
+      const response = await today()
+
+      expect(response).toMatchObject({
+        started: false,
+        week: null,
+        card: null,
+        hold: { title: 'See a professional' },
+        checkInsDue: [{ pauseId: 'pause-nothing', step: null, title: null, checkDay: dayText(dayAt(4)) }],
+        remindersOff: false,
+        inbox: { unread: 1 },
+      })
+      expect(response.inbox.latest.map((item: any) => item.title)).toEqual(['We paused a step'])
+    })
+  })
+
+  describe('the week of the plan', () => {
+    it.each([
+      [1, 1],
+      [7, 1],
+      [8, 2],
+      [14, 2],
+      [15, 3],
+      [56, 8],
+      [57, 9],
+      [85, 13],
+      [91, 13],
+      [92, 14],
+      [140, 20],
+    ])('on day %i it is week %i (counted from day 1, with no cap), and the card is asked for that week', async (day, week) => {
+      await started()
+      atUtc(day, 12)
+
+      const response = await today()
+
+      expect(response.week).toBe(week)
+      expect(response.card).toEqual({ title: `Week ${week} for fade-dark-marks`, text: `Text for week ${week}.` })
+    })
+
+    // Day 1 is 2030-06-16, so day 7 ends at the end of 2030-06-22 and day 8 begins on 2030-06-23, in the person's own day.
+    it.each([
+      ['Africa/Lagos', 'one minute before local midnight (23:59 on day 7)', 22, 59, 1],
+      ['Africa/Lagos', 'local midnight (00:00 on day 8)', 23, 0, 2],
+      ['America/New_York', 'one minute before local midnight, which is already the next day in UTC', 3, 59, 1],
+      ['America/New_York', 'local midnight', 4, 0, 2],
+    ] as const)('turns the week at the local midnight of %s, not the UTC one: %s', async (zone, _when, hh, mm, week) => {
+      world.zone = zone
+      await started()
+      // New York's midnight of day 7 to 8 is 04:00Z of 2030-06-23, which is day 8 of the UTC calendar; Lagos's is 23:00Z of 2030-06-22.
+      atUtc(zone === 'Africa/Lagos' ? 7 : 8, hh, mm)
+
+      expect((await today()).week).toBe(week)
+    })
+
+    it('asks the skin-care module for the person\'s local day: 23:30 UTC is already the next day in Lagos', async () => {
+      world.zone = 'Africa/Lagos'
+      await started()
+      atUtc(3, 23, 30)
+
+      const response = await today()
+
+      expect(response.day).toBe(dayText(dayAt(4)))
+      expect(stateFor).toHaveBeenCalledWith(PROFILE, dayText(dayAt(4)))
+      expect(checkInsDue).toHaveBeenCalledWith(PROFILE, dayText(dayAt(4)))
+    })
+
+    it('uses UTC for a stored zone Intl cannot use: the day, and so the week, are the UTC ones', async () => {
+      world.zone = 'Mars/Olympus_Mons'
+      await started()
+      atUtc(7, 23, 30)
+
+      const response = await today()
+
+      expect(response.day).toBe(dayText(dayAt(7)))
+      expect(response.week).toBe(1)
+      expect(stateFor).toHaveBeenCalledWith(PROFILE, dayText(dayAt(7)))
+    })
+  })
+
+  describe('the week card', () => {
+    it('is the card for the person\'s current goal (the one the rest of the app reads), even when the routine in force was built for another: a goal with its own card is shown that card', async () => {
+      world.goal = 'glow'
+      await started({ goal: 'even-tone' })
+      atUtc(1, 12)
+
+      expect((await today()).card).toEqual({ title: 'Week 1 for glow', text: 'Text for week 1.' })
+    })
+
+    it('asks for the step-down version while a dated step-down is running: its last running day (day 35) still does', async () => {
+      await started({ tapers: [{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: START_DAY }] })
+      atUtc(35, 12)
+
+      expect((await today()).card).toEqual({ title: 'Week 5 for fade-dark-marks on a step-down', text: 'Text for week 5.' })
+    })
+
+    it('goes back to the plain version the day after the step-down ends (day 36)', async () => {
+      await started({ tapers: [{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: START_DAY }] })
+      atUtc(36, 12)
+
+      expect((await today()).card).toEqual({ title: 'Week 6 for fade-dark-marks', text: 'Text for week 6.' })
+    })
+
+    it('is null when the team has approved no card for the week, and the rest of Today is as it was (200, never a failure)', async () => {
+      world.noWeekCards = true
+      await started()
+      atUtc(1, 12)
+
+      const response = await today()
+
+      expect(response.card).toBeNull()
+      expect(response.week).toBe(1)
+      expect(stepsIn(response, 'morning')).toEqual(['cleanse', 'moisturise', 'protect'])
+    })
+  })
+
+  describe('the current half of the day', () => {
+    // The split is a fixed 15:00 on the person's own clock. It is not the evening reminder time, which the stored settings below put well on either side of it.
+    it.each([
+      ['no stored zone (UTC)', null, 3, 14, 59, 'morning'],
+      ['no stored zone (UTC)', null, 3, 15, 0, 'evening'],
+      ['Africa/Lagos (UTC+1)', 'Africa/Lagos', 3, 13, 59, 'morning'],
+      ['Africa/Lagos (UTC+1)', 'Africa/Lagos', 3, 14, 0, 'evening'],
+      ['Europe/London in June (BST, UTC+1)', 'Europe/London', 3, 13, 59, 'morning'],
+      ['Europe/London in June (BST, UTC+1)', 'Europe/London', 3, 14, 0, 'evening'],
+      ['Europe/London on 1 January (GMT, UTC+0)', 'Europe/London', 200, 14, 59, 'morning'],
+      ['Europe/London on 1 January (GMT, UTC+0)', 'Europe/London', 200, 15, 0, 'evening'],
+      ['America/New_York in June (EDT, UTC-4)', 'America/New_York', 3, 18, 59, 'morning'],
+      ['America/New_York in June (EDT, UTC-4)', 'America/New_York', 3, 19, 0, 'evening'],
+      ['America/New_York on 1 January (EST, UTC-5)', 'America/New_York', 200, 19, 59, 'morning'],
+      ['America/New_York on 1 January (EST, UTC-5)', 'America/New_York', 200, 20, 0, 'evening'],
+      ['a stored zone Intl cannot use (UTC)', 'Mars/Olympus_Mons', 3, 14, 59, 'morning'],
+      ['a stored zone Intl cannot use (UTC)', 'Mars/Olympus_Mons', 3, 15, 0, 'evening'],
+    ] as const)('in %s (stored zone %s), at day %i %i:%i UTC it is the %s half', async (_label, zone, day, hh, mm, half) => {
+      world.zone = zone
+      await started()
+      atUtc(day, hh, mm)
+
+      expect((await today()).half).toBe(half)
+    })
+
+    it('does not move the split with the evening reminder time: at 16:00 local it is evening though the reminder is at 21:00, and at 13:00 local it is morning though the reminder is at 12:00', async () => {
+      world.zone = 'Africa/Lagos'
+      await started()
+
+      world.reminders.evening = '21:00'
+      atUtc(3, 15, 0) // 16:00 in Lagos
+      expect((await today()).half).toBe('evening')
+
+      world.reminders.evening = '12:00'
+      atUtc(3, 12, 0) // 13:00 in Lagos
+      expect((await today()).half).toBe('morning')
+    })
+
+    it('lists the morning entries as current in the morning and the evening ones as the other half, then the other way round in the evening', async () => {
+      await started()
+
+      atUtc(3, 10)
+      const morning = await today()
+      atUtc(3, 20)
+      const evening = await today()
+
+      // Cleanse am, treat pm, moisturise am-pm, protect am (the default routine).
+      expect([morning.half, stepsOf(morning.current), stepsOf(morning.other)]).toEqual(['morning', ['cleanse', 'moisturise', 'protect'], ['treat', 'moisturise']])
+      expect([evening.half, stepsOf(evening.current), stepsOf(evening.other)]).toEqual(['evening', ['treat', 'moisturise'], ['cleanse', 'moisturise', 'protect']])
+    })
+
+    it('shows each entry as the routine does: its title, how often, why, and the product (here a recommended serum), with status active', async () => {
+      await started()
+      atUtc(3, 20)
+
+      const [treat] = (await today()).current.entries
+
+      expect(treat).toMatchObject({ step: 'treat', title: 'Serum', when: 'Every day', reason: 'Reason for treat.', status: 'active', product: { kind: 'recommended', code: 'SERUM-1' } })
+      expect(treat).not.toHaveProperty('changed')
+    })
+  })
+
+  describe('what is left out of the halves', () => {
+    it('leaves a paused step out of both halves, and keeps the rest', async () => {
+      world.skinCare = { pauses: [{ step: 'moisturise', productId: 'product-MOIST-GH', state: 'paused' }, { step: 'treat', productId: 'product-SERUM-1', state: 'paused' }], held: false }
+      await started()
+      atUtc(3, 10)
+
+      const response = await today()
+
+      expect(stepsIn(response, 'morning')).toEqual(['cleanse', 'protect'])
+      expect(stepsIn(response, 'evening')).toEqual([])
+    })
+
+    it('leaves a held step (one with an active ingredient, under a hold) out of both halves, keeps the basics, and says "See a professional"', async () => {
+      world.rules = structuredClone(INGREDIENT_RULES)
+      world.facts.set('form-serum-1', { productId: 'product-SERUM-1', brand: 'Lumina', name: 'Bright Serum', variant: null, form: 'serum', category: 'skin', ingredients: ['Aqua', 'Retinol'] })
+      world.skinCare = { pauses: [], held: true }
+      await started()
+      atUtc(3, 10)
+
+      const response = await today()
+
+      expect(stepsIn(response, 'morning')).toEqual(['cleanse', 'moisturise', 'protect'])
+      expect(stepsIn(response, 'evening')).toEqual(['moisturise'])
+      expect(response.hold).toEqual({ title: 'See a professional' })
+    })
+
+    it('has no hold when skin-care does not say held', async () => {
+      await started()
+
+      expect((await today()).hold).toBeNull()
+    })
+
+    // Day 1 is the anchor: an every-other-evening step is due on days 1, 3 and 5 and rests on 2 and 4.
+    it.each([[1, true], [2, false], [3, true], [4, false], [5, true]])('leaves an every-other-day step out on its rest days: on day %i it is in the evening list: %s', async (day, due) => {
+      await started({ steps: [stepOf('cleanse', { kind: 'shelf', id: 'entry-a' }, 'am'), stepOf('treat', { kind: 'candidate', code: 'SERUM-1' }, 'alternate-days'), stepOf('protect', { kind: 'none' }, 'am')] })
+      atUtc(day, 20)
+
+      expect(stepsIn(await today(), 'evening').includes('treat')).toBe(due)
+    })
+
+    // A weekly step is due on day 1, 8 and 15, and not on the six days between.
+    it.each([[1, true], [2, false], [7, false], [8, true], [9, false], [14, false], [15, true]])('leaves a weekly step out on the days between: on day %i it is in the evening list: %s', async (day, due) => {
+      await started({ steps: [stepOf('cleanse', { kind: 'shelf', id: 'entry-a' }, 'am'), stepOf('treat', { kind: 'candidate', code: 'SERUM-1' }, 'weekly'), stepOf('protect', { kind: 'none' }, 'am')] })
+      atUtc(day, 20)
+
+      expect(stepsIn(await today(), 'evening').includes('treat')).toBe(due)
+    })
+
+    it('never lists an as-needed step (it is never due on a day), however many days in', async () => {
+      await started({ steps: [stepOf('cleanse', { kind: 'shelf', id: 'entry-a' }, 'am'), stepOf('treat', { kind: 'candidate', code: 'SERUM-1' }, 'as-needed'), stepOf('protect', { kind: 'none' }, 'am')] })
+
+      for (const day of [1, 2, 8]) {
+        atUtc(day, 20)
+        expect(stepsIn(await today(), 'evening')).toEqual([])
+      }
+    })
+
+    it('lists a morning step (am, and the sunscreen) on every day: the rest-day rule is for the evening list only', async () => {
+      await started()
+
+      for (const day of [1, 2, 3, 8]) {
+        atUtc(day, 10)
+        expect(stepsIn(await today(), 'morning')).toEqual(['cleanse', 'moisturise', 'protect'])
+      }
+    })
+  })
+
+  describe('a step being brought back', () => {
+    // The treatment is on a rung of every other evening whose first day is day 4, the second of three rungs: due on days 4, 6, 8. Its routine title is "Serum" and the plain noun
+    // for its step "Treatment", so the line below says which of the two it uses.
+    const bringBackTreat = () => {
+      world.skinCare = { pauses: [{ step: 'treat', productId: 'product-SERUM-1', state: 'bringing-back', frequency: 'alternate-days', anchor: dayText(dayAt(4)), rung: 2, of: 3 }], held: false }
+    }
+
+    it.each([[4, true], [5, false], [6, true], [7, false]])('shows it on its rung\'s days only, counted from the rung\'s first day: on day %i it is in the evening list: %s', async (day, due) => {
+      bringBackTreat()
+      await started()
+      atUtc(day, 20)
+
+      expect(stepsIn(await today(), 'evening').includes('treat')).toBe(due)
+    })
+
+    it('marks the entry bringing-back and gives it the rung\'s frequency', async () => {
+      bringBackTreat()
+      await started()
+      atUtc(4, 20)
+
+      const entry = (await today()).current.entries.find((e: any) => e.step === 'treat')
+
+      expect(entry).toMatchObject({ status: 'bringing-back', when: 'Every other evening' })
+    })
+
+    it('places an am-pm step in the evening list only while its rung is every other evening: the moisturiser leaves the morning', async () => {
+      world.skinCare = { pauses: [{ step: 'moisturise', productId: 'product-MOIST-GH', state: 'bringing-back', frequency: 'alternate-days', anchor: dayText(dayAt(4)), rung: 1, of: 3 }], held: false }
+      await started()
+      atUtc(4, 10)
+
+      const response = await today()
+
+      expect(stepsIn(response, 'morning')).toEqual(['cleanse', 'protect'])
+      expect(stepsIn(response, 'evening')).toEqual(['treat', 'moisturise'])
+    })
+
+    it('says "Bringing back {step}: step n of m" with the routine\'s title for the step ("Serum", not the noun "Treatment"), on a rung day and on a rest day', async () => {
+      bringBackTreat()
+      await started()
+
+      for (const day of [4, 5]) {
+        atUtc(day, 20)
+        expect((await today()).bringingBack).toEqual([{ step: 'treat', title: 'Serum', rung: 2, of: 3, line: 'Bringing back Serum: step 2 of 3' }])
+      }
+    })
+
+    it('lists nothing as brought back when no step is', async () => {
+      await started()
+
+      expect((await today()).bringingBack).toEqual([])
+    })
+  })
+
+  describe('ticking off a half', () => {
+    // The real write path: POST /me/routine/check-ins is RoutineCheckInsService.checkIn, over the same fake repository the viewer reads the day's check-ins from.
+    // The all-done row is the check-ins service's own (its tests cover it); Today reads only the day's check-ins, so the inbox and the plan are stubs.
+    const tick = (time: 'morning' | 'evening', day = localDay(clock, world.zone)) =>
+      asVerified(() =>
+        new RoutineCheckInsService({
+          repository: checkInsRepository,
+          versions: repository,
+          reminders: { zoneFor: async () => world.zone },
+          inbox: { write: async () => ({ id: 'unused', created: true }) },
+          routine: { reminderPlanFor: async () => null },
+          now: () => clock,
+        }).checkIn(day, time),
+      )
+
+    beforeEach(async () => {
+      await started()
+    })
+
+    it('has neither half done, and is not all done, before any check-in', async () => {
+      atUtc(3, 10)
+
+      const response = await today()
+
+      expect([response.current.done, response.other.done, response.allDone]).toEqual([false, false, false])
+    })
+
+    it('marks the current half done once it is ticked off (morning, in the morning), and not the other', async () => {
+      atUtc(3, 10)
+      await tick('morning')
+
+      const response = await today()
+
+      expect([response.half, response.current.done, response.other.done, response.allDone]).toEqual(['morning', true, false, false])
+    })
+
+    it('marks the morning done as the other half in the evening, and the evening (current) not done', async () => {
+      atUtc(3, 10)
+      await tick('morning')
+      atUtc(3, 20)
+
+      const response = await today()
+
+      expect([response.half, response.current.done, response.other.done, response.allDone]).toEqual(['evening', false, true, false])
+    })
+
+    it('marks the evening done as the other half when it was ticked off early, before the current (morning) half', async () => {
+      atUtc(3, 10)
+      await tick('evening')
+
+      const response = await today()
+
+      expect([response.half, response.current.done, response.other.done, response.allDone]).toEqual(['morning', false, true, false])
+    })
+
+    it('is all done when both halves are ticked off today', async () => {
+      atUtc(3, 10)
+      await tick('morning')
+      atUtc(3, 20)
+      await tick('evening')
+
+      const response = await today()
+
+      expect([response.current.done, response.other.done, response.allDone]).toEqual([true, true, true])
+    })
+
+    it('does not count yesterday\'s check-ins: both halves ticked off on day 2 leave day 3 untouched', async () => {
+      atUtc(2, 10)
+      await tick('morning')
+      await tick('evening')
+      atUtc(3, 10)
+
+      const response = await today()
+
+      expect([response.current.done, response.other.done, response.allDone]).toEqual([false, false, false])
+    })
+
+    it('counts a check-in by the local day of the stored zone: a tick at 23:30 UTC in Lagos is for the next day, and is read as that day\'s', async () => {
+      world.zone = 'Africa/Lagos'
+      atUtc(3, 23, 30)
+      await tick('evening')
+
+      const response = await today()
+
+      expect(response.day).toBe(dayText(dayAt(4)))
+      expect([response.half, response.current.done, response.other.done]).toEqual(['morning', false, true])
+    })
+
+    it('counts a half with nothing due as done: when the evening is all paused or resting, ticking off the morning makes the day all done', async () => {
+      world.skinCare = { pauses: [{ step: 'treat', productId: 'product-SERUM-1', state: 'paused' }, { step: 'moisturise', productId: 'product-MOIST-GH', state: 'paused' }], held: false }
+      atUtc(3, 10)
+
+      const before = await today()
+      expect([stepsIn(before, 'evening'), listOf(before, 'evening').done, before.allDone]).toEqual([[], true, false])
+
+      await tick('morning')
+      const after = await today()
+
+      expect([after.current.done, after.other.done, after.allDone]).toEqual([true, true, true])
+    })
+
+    it('does not count a half with entries as done until it is ticked off, whatever the other half holds', async () => {
+      world.skinCare = { pauses: [{ step: 'treat', productId: 'product-SERUM-1', state: 'paused' }, { step: 'moisturise', productId: 'product-MOIST-GH', state: 'paused' }], held: false }
+      atUtc(3, 20)
+
+      const response = await today()
+
+      expect([response.half, response.current.done, response.other.done, response.allDone]).toEqual(['evening', true, false, false])
+    })
+  })
+
+  describe('step-down progress', () => {
+    const STEP_DOWN = { shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: START_DAY }
+
+    // The template is weeks 1-2 every other day, 3-4 weekly and 5 stop: three steps. Day 1 is its first day, so week 3 starts on day 15 and week 5 on day 29; it ends after day 35.
+    it.each([
+      [1, 1],
+      [14, 1],
+      [15, 2],
+      [28, 2],
+      [29, 3],
+      [35, 3],
+    ])('on day %i it is step %i of 3, with the line the screen shows', async (day, step) => {
+      await started({ tapers: [STEP_DOWN] })
+      atUtc(day, 12)
+
+      expect((await today()).stepDowns).toEqual([{ entryId: 'entry-b', title: 'Cream', step, of: 3, line: `Step-down: step ${step} of 3` }])
+    })
+
+    it('is gone the day after the last step ends (day 36): only a running step-down is shown', async () => {
+      await started({ tapers: [STEP_DOWN] })
+      atUtc(36, 12)
+
+      expect((await today()).stepDowns).toEqual([])
+    })
+
+    it('shows none for a step-down that has no start date, and none when there is no step-down', async () => {
+      await started()
+      atUtc(3, 12)
+      expect((await today()).stepDowns).toEqual([])
+
+      await showing(versionRow({ startedOn: START_DAY, tapers: [] }))
+      expect((await today()).stepDowns).toEqual([])
+    })
+
+    it('counts the step-down\'s days in the person\'s local day: 23:30 UTC on day 14 is already day 15 in Lagos, so step 2', async () => {
+      world.zone = 'Africa/Lagos'
+      await started({ tapers: [STEP_DOWN] })
+      atUtc(14, 23, 30)
+
+      expect((await today()).stepDowns).toMatchObject([{ step: 2, of: 3 }])
+    })
+  })
+
+  describe('check-ins that are due', () => {
+    it('lists none when skin-care has none due', async () => {
+      await started()
+
+      expect((await today()).checkInsDue).toEqual([])
+    })
+
+    it('lists what skin-care says is due until it is answered: a step (named by its routine title) and the check-in with no step, each with its pause id and check day', async () => {
+      world.checkInsDue = [
+        pauseRow({ id: 'pause-treat', step: 'treat', checkDay: dayText(dayAt(3)) }),
+        pauseRow({ id: 'pause-nothing', step: null, productKey: '', productId: null, productRef: { kind: 'none' }, ingredientGroup: null, checkDay: dayText(dayAt(2)) }),
+      ]
+      await started()
+      atUtc(3, 10)
+
+      const due = (await today()).checkInsDue.sort((a: any, b: any) => (a.pauseId < b.pauseId ? -1 : 1))
+
+      expect(due).toEqual([
+        { pauseId: 'pause-nothing', step: null, title: null, checkDay: dayText(dayAt(2)) },
+        { pauseId: 'pause-treat', step: 'treat', title: 'Serum', checkDay: dayText(dayAt(3)) },
+      ])
+    })
+  })
+
+  describe('the reminders banner', () => {
+    it('says reminders are off when they are not enabled (including when the person never set any)', async () => {
+      await started()
+
+      expect((await today()).remindersOff).toBe(true)
+    })
+
+    it('says they are not off when they are enabled', async () => {
+      world.reminders.enabled = true
+      await started()
+
+      expect((await today()).remindersOff).toBe(false)
+    })
+  })
+
+  describe('the inbox summary', () => {
+    const write = (key: string, title: string, at: Date, profileId = PROFILE) => {
+      clock = at
+      return inbox.write({ profileId, kind: 'step-down-day', day: dayText(dayAt(3)), title, body: 'Plain body.', link: '/routine', key })
+    }
+
+    it('has no unread and no rows for a person with an empty inbox', async () => {
+      await started()
+
+      expect((await today()).inbox).toEqual({ unread: 0, latest: [] })
+    })
+
+    it('is the unread count and the newest rows as the inbox service gives them, newest first, with their read marks, and no other profile\'s rows', async () => {
+      await started()
+      const first = await write('step-down:1', 'First line', at(0))
+      await write('step-down:2', 'Second line', at(MINUTE))
+      await write('step-down:other', 'Someone else', at(2 * MINUTE), 'profile-someone-else')
+      await inbox.markReadById(PROFILE, first.id)
+      atUtc(3, 10)
+
+      const { inbox: summary } = await today()
+
+      expect(summary.unread).toBe(1)
+      expect(summary.latest.map((item: any) => [item.title, item.read])).toEqual([['Second line', false], ['First line', true]])
+      expect(summary.latest[0]).toEqual({ id: expect.any(String), kind: 'step-down-day', day: dayText(dayAt(3)), title: 'Second line', body: 'Plain body.', link: '/routine', read: false, createdAt: at(MINUTE).toISOString() })
+    })
+  })
+
+  describe('when skin-care cannot be read', () => {
+    it('fails the whole read when the pauses and hold cannot be read: it never shows a paused step as active', async () => {
+      stateFor.mockRejectedValue(new Error('state unavailable'))
+      await started()
+
+      await expect(today()).rejects.toThrow('state unavailable')
+    })
+
+    it('fails the whole read when the check-ins due cannot be read: it never shows Today without the question the person has to answer', async () => {
+      checkInsDue.mockRejectedValue(new Error('check-ins unavailable'))
+      await started()
+
+      await expect(today()).rejects.toThrow('check-ins unavailable')
+    })
+
+    it('fails the read for a person with no routine too: the hold and the question are read there as well', async () => {
+      stateFor.mockRejectedValue(new Error('state unavailable'))
+
+      await expect(today()).rejects.toThrow('state unavailable')
+    })
+  })
+
+  describe('the order of the skin-care reads', () => {
+    it('asks which check-ins are due after the state has settled the pauses: a row the state replaced is not due, and one it paused again for now is', async () => {
+      world.checkInsDue = [pauseRow({ id: 'pause-replaced', checkDay: dayText(dayAt(2)) })]
+      stateFor.mockImplementation(async () => {
+        // Settling the pauses takes a turn, so a check-ins read started beside it would see the rows as they were.
+        await Promise.resolve()
+        world.checkInsDue = [pauseRow({ id: 'pause-again', checkDay: dayText(dayAt(3)) })]
+        return structuredClone(world.skinCare)
+      })
+      await started()
+      atUtc(3, 10)
+
+      expect((await today()).checkInsDue.map((item: any) => item.pauseId)).toEqual(['pause-again'])
+    })
+  })
+
+  describe('the paused steps', () => {
+    it('lists each open pause with its id, the routine\'s title for the step and the day it is checked, until the person answers', async () => {
+      world.skinCare = { pauses: [{ step: 'treat', productId: 'product-SERUM-1', state: 'paused', pauseId: 'pause-treat', checkDay: dayText(dayAt(6)) }], held: false }
+      await started()
+      atUtc(3, 10)
+
+      const response = await today()
+
+      expect(response.paused).toEqual([{ pauseId: 'pause-treat', step: 'treat', title: 'Serum', checkDay: dayText(dayAt(6)) }])
+      expect(stepsIn(response, 'evening')).toEqual(['moisturise'])
+    })
+
+    it('lists none when nothing is paused, and none for a step that is being brought back', async () => {
+      world.skinCare = { pauses: [{ step: 'treat', productId: 'product-SERUM-1', state: 'bringing-back', frequency: 'alternate-days', anchor: dayText(dayAt(4)), rung: 1, of: 2 }], held: false }
+      await started()
+      atUtc(3, 10)
+
+      expect((await today()).paused).toEqual([])
+    })
+
+    it('still lists a pause on the day Start was tapped (a harm log can pause a step then), though no entry is shown yet', async () => {
+      world.skinCare = { pauses: [{ step: 'treat', productId: 'product-SERUM-1', state: 'paused', pauseId: 'pause-treat', checkDay: dayText(dayAt(3)) }], held: false }
+      await started()
+
+      expect(await today()).toMatchObject({ week: null, current: { entries: [] }, paused: [{ pauseId: 'pause-treat', step: 'treat', title: 'Serum', checkDay: dayText(dayAt(3)) }] })
+    })
+  })
+
+  describe('a rung that is clamped, and a hold over a rung', () => {
+    it('keeps a weekly step weekly on a rung that would use it more often: its entry says once a week, it is due on its own weekly days counted from the rung\'s first day, and the line still says which rung', async () => {
+      await started({ steps: [stepOf('cleanse', { kind: 'shelf', id: 'entry-a' }, 'am'), stepOf('treat', { kind: 'candidate', code: 'SERUM-1' }, 'weekly'), stepOf('protect', { kind: 'none' }, 'am')] })
+      world.skinCare = { pauses: [{ step: 'treat', productId: 'product-SERUM-1', state: 'bringing-back', frequency: 'alternate-days', anchor: dayText(dayAt(4)), rung: 2, of: 3 }], held: false }
+
+      const seen: Record<number, any> = {}
+      for (const day of [4, 6, 8, 11]) {
+        atUtc(day, 20)
+        seen[day] = await today()
+      }
+
+      expect([4, 6, 8, 11].map((day) => stepsIn(seen[day], 'evening').includes('treat'))).toEqual([true, false, false, true])
+      expect(listOf(seen[4], 'evening').entries[0]).toMatchObject({ step: 'treat', status: 'bringing-back', when: 'Once a week' })
+      expect(seen[6].bringingBack).toEqual([{ step: 'treat', title: 'Serum', rung: 2, of: 3, line: 'Bringing back Serum: step 2 of 3' }])
+    })
+
+    it('lets an open hold win over a rung: the held step is in neither half and is not listed as brought back, and Today says "See a professional"', async () => {
+      world.rules = structuredClone(INGREDIENT_RULES)
+      world.facts.set('form-serum-1', { productId: 'product-SERUM-1', brand: 'Lumina', name: 'Bright Serum', variant: null, form: 'serum', category: 'skin', ingredients: ['Aqua', 'Retinol'] })
+      world.skinCare = { pauses: [{ step: 'treat', productId: 'product-SERUM-1', state: 'bringing-back', frequency: 'alternate-days', anchor: dayText(dayAt(4)), rung: 2, of: 3 }], held: true }
+      await started()
+      atUtc(4, 20)
+
+      const response = await today()
+
+      expect(stepsIn(response, 'evening')).toEqual(['moisturise'])
+      expect(stepsIn(response, 'morning')).toEqual(['cleanse', 'moisturise', 'protect'])
+      expect(response.bringingBack).toEqual([])
+      expect(response.hold).toEqual({ title: 'See a professional' })
+    })
+  })
+
+  describe('when the inbox cannot be read', () => {
+    it('answers an empty inbox and logs it, and the rest of Today is as ever: only the skin-care reads fail the read', async () => {
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+      vi.spyOn(inbox, 'summaryFor').mockRejectedValue(new Error('inbox unavailable'))
+      await started()
+      atUtc(3, 10)
+
+      const response = await today()
+
+      expect(response.inbox).toEqual({ unread: 0, latest: [] })
+      expect(response.week).toBe(1)
+      expect(logged).toHaveBeenCalledWith({ outcome: 'today-inbox-failed', profileId: PROFILE })
+      logged.mockRestore()
+    })
+
+    it('shows only the documented fields of an inbox row, whatever else the inbox service hands back', async () => {
+      vi.spyOn(inbox, 'summaryFor').mockResolvedValue({
+        unread: 1,
+        latest: [{ id: 'i-1', kind: 'paused', day: dayText(dayAt(3)), title: 'T', body: 'B', link: '/routine', read: false, createdAt: at(0), key: 'secret-key', profileId: PROFILE } as never],
+      })
+      await started()
+
+      const { latest } = (await today()).inbox
+
+      expect(Object.keys(latest[0]).sort()).toEqual(['body', 'createdAt', 'day', 'id', 'kind', 'link', 'read', 'title'])
+    })
   })
 })

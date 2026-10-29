@@ -90,6 +90,12 @@ export class RemindersService {
     return (await this.repository.get(profileId))?.timeZone ?? null
   }
 
+  /** The zone and the on switch together, from one read, by profile id with no session (Today reads both): no zone and off with no row, and for an unknown profile. */
+  async zoneAndEnabledFor(profileId: string): Promise<{ zone: string | null; enabled: boolean }> {
+    const row = await this.repository.get(profileId)
+    return { zone: row?.timeZone ?? null, enabled: row?.enabled ?? false }
+  }
+
   /** Whether the profile has reminders on, by profile id with no session (the notification send reads it); false with no row, and for an unknown profile. */
   async enabledFor(profileId: string): Promise<boolean> {
     return (await this.repository.get(profileId))?.enabled ?? false

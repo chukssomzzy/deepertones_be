@@ -6,6 +6,7 @@ import { FakeInboxRepository } from '../inbox/inbox.repository.fake'
 import { type InboxWrite, InboxService } from '../inbox/inbox.service'
 import { FORBIDDEN_WORDING } from '../routines/routines.wording'
 import { FakeSkinCareRepository } from './skin-care.repository.fake'
+import { FakeEscalationHoldsRepository } from './skin-care.holds.repository.fake'
 import { FakeStepPausesRepository } from './skin-care.pauses.repository.fake'
 import { SkinCareService } from './skin-care.service'
 import type { ScheduleStep } from '../catalog/catalog.workbook.schema'
@@ -144,6 +145,10 @@ const makeService = () =>
   new SkinCareService({
     repository,
     pauses,
+    holds: new FakeEscalationHoldsRepository(),
+    safety: { markReactionProduct: async () => ({ marked: false }) },
+    verdicts: { savedFor: async () => null },
+    catalog: { namedProduct: async () => Promise.reject(new Error('unused')) },
     workbook: {
       responseFor: async (outcome) => world.responses[outcome] ?? null,
       escalationFor: async (reason) => world.escalations[reason] ?? null,
@@ -159,8 +164,10 @@ const makeService = () =>
     },
     inbox: {
       write: async (input: InboxWrite) => {
-        world.inboxWrites.push(input)
-        return inboxRows.write(input)
+        // The rows made: every professional result asks for the hold's escalation row, and the same key is a no-op.
+        const written = await inboxRows.write(input)
+        if (written.created) world.inboxWrites.push(input)
+        return written
       },
     },
     now: () => world.now,
@@ -984,7 +991,7 @@ describe('SkinCareService.reconcile', () => {
     await service.reconcile(AMARA)
 
     expect(await pauses.find(AMARA, result.paused!.id)).toMatchObject({ state: 'paused' })
-    expect(await service.stateFor(AMARA, TODAY)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused' }], held: false })
+    expect(await service.stateFor(AMARA, TODAY)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: result.paused!.id, checkDay: dayAt(3) }], held: false })
   })
 
   it('sets a pause to replaced when the step now has another product', async () => {
@@ -1016,7 +1023,7 @@ describe('SkinCareService.reconcile', () => {
     await service.reconcile(AMARA)
 
     expect(await pauses.find(AMARA, result.paused!.id)).toMatchObject({ state: 'paused', productKey: 'prod-treat' })
-    expect((await service.stateFor(AMARA, TODAY)).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused' }])
+    expect((await service.stateFor(AMARA, TODAY)).pauses).toEqual([{ step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: result.paused!.id, checkDay: dayAt(3) }])
   })
 
   it('keeps a no-label own product\'s pause while the same shelf entry is in the step, and replaces it when another entry is', async () => {
@@ -1087,15 +1094,15 @@ describe('SkinCareService.stateFor', () => {
   })
 
   it('answers each open paused step as { step, productId, state: paused }, and no hold', async () => {
-    await harm()
-    await harm()
+    const first = await harm()
+    const second = await harm()
 
     const state = await service.stateFor(AMARA, TODAY)
 
     expect(state.held).toBe(false)
     expect([...state.pauses].sort((a, b) => a.step.localeCompare(b.step))).toEqual([
-      { step: 'moisturise', productId: 'prod-moisturise', state: 'paused' },
-      { step: 'treat', productId: 'prod-treat', state: 'paused' },
+      { step: 'moisturise', productId: 'prod-moisturise', state: 'paused', pauseId: second.paused!.id, checkDay: dayAt(3) },
+      { step: 'treat', productId: 'prod-treat', state: 'paused', pauseId: first.paused!.id, checkDay: dayAt(3) },
     ])
   })
 
@@ -1103,9 +1110,9 @@ describe('SkinCareService.stateFor', () => {
     const treatStep = world.routines.get(AMARA)!.steps.find((s) => s.step === 'treat')!
     treatStep.productRef = { kind: 'shelf', id: 'entry-unlabelled' }
     treatStep.productId = null
-    await harm()
+    const made = await harm()
 
-    expect((await service.stateFor(AMARA, TODAY)).pauses).toEqual([{ step: 'treat', productId: 'entry-unlabelled', state: 'paused' }])
+    expect((await service.stateFor(AMARA, TODAY)).pauses).toEqual([{ step: 'treat', productId: 'entry-unlabelled', state: 'paused', pauseId: made.paused!.id, checkDay: dayAt(3) }])
   })
 
   it('leaves out an undone pause, and another profile\'s', async () => {

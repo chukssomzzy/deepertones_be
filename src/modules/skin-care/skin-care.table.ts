@@ -3,7 +3,7 @@ import { index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqli
 import type { EscalationReason, IngredientGroup, RoutineStep } from '../catalog/catalog.vocabulary'
 import { profiles } from '../profiles/profiles.table'
 import type { SkinOutcome } from './skin-care.outcomes'
-import type { HowBad, Noticing, PauseState, SkinCareProductRef, Where } from './skin-care.vocabulary'
+import type { HoldCloseHow, HowBad, Noticing, PauseState, SkinCareProductRef, Where } from './skin-care.vocabulary'
 
 /**
  * A profile's skin logs (spec #233): what they noticed, where, how bad, and an optional note. The note is only stored and shown back on the professional screen; no rule reads it.
@@ -68,4 +68,26 @@ export const stepPauses = sqliteTable(
     uniqueIndex('step_pauses_open_stepless_unique').on(t.profileId).where(sql`${t.step} IS NULL AND ${t.state} IN ('paused', 'bringing-back')`),
     index('step_pauses_profile_created_idx').on(t.profileId, t.createdAt),
   ],
+)
+
+/**
+ * An escalation hold (spec #233): a professional outcome keeps the active steps out of the routine until the person closes it. A profile has at most one open hold (a partial unique
+ * index over `profile_id` where `closed_at` is null), so opening is idempotent; closed holds stay as history. `opened_on` is the person's local calendar day ('YYYY-MM-DD'), fixed when
+ * the hold is opened. `source_log_id` is the log that caused it, kept as plain text (not a key). Rows go with their profile (cascade).
+ */
+export const escalationHolds = sqliteTable(
+  'escalation_holds',
+  {
+    id: text('id').primaryKey(),
+    profileId: text('profile_id')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
+    reason: text('reason').$type<EscalationReason>().notNull(),
+    sourceLogId: text('source_log_id'),
+    openedOn: text('opened_on').notNull(),
+    openedAt: integer('opened_at', { mode: 'timestamp_ms' }).notNull(),
+    closedAt: integer('closed_at', { mode: 'timestamp_ms' }),
+    closedHow: text('closed_how').$type<HoldCloseHow>(),
+  },
+  (t) => [uniqueIndex('escalation_holds_open_profile_unique').on(t.profileId).where(sql`${t.closedAt} IS NULL`)],
 )

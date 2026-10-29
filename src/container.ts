@@ -47,6 +47,7 @@ import { ScanDataCleaner } from './modules/scans/scans.cleaner'
 import { ScanService } from './modules/scans/scans.service'
 import { D1ShelfRepository } from './modules/shelf/shelf.repository'
 import { ShelfService } from './modules/shelf/shelf.service'
+import { D1EscalationHoldsRepository } from './modules/skin-care/skin-care.holds.repository'
 import { D1StepPausesRepository } from './modules/skin-care/skin-care.pauses.repository'
 import { D1SkinCareRepository } from './modules/skin-care/skin-care.repository'
 import { SkinCareService } from './modules/skin-care/skin-care.service'
@@ -450,6 +451,7 @@ export const buildContainer = (env: CloudflareBindings) => {
       new SkinCareService({
         repository: new D1SkinCareRepository(db()),
         pauses: new D1StepPausesRepository(db()),
+        holds: new D1EscalationHoldsRepository(db()),
         workbook: catalogWorkbook(),
         reminders: reminders(),
         routine: {
@@ -459,13 +461,18 @@ export const buildContainer = (env: CloudflareBindings) => {
           skinCareRoutineFor: async (profileId: string): Promise<SkinCareRoutine | null> => routineViewer().skinCareRoutineFor(profileId),
         },
         inbox: inbox(),
+        safety: safety(),
+        verdicts: verdicts(),
+        catalog: catalog(),
       }),
   )
+
+  const routineCheckInsRepository = once(() => new D1RoutineCheckInsRepository(db()))
 
   const routineCheckIns = once(
     () =>
       new RoutineCheckInsService({
-        repository: new D1RoutineCheckInsRepository(db()),
+        repository: routineCheckInsRepository(),
         versions: new D1RoutinesRepository(db()),
         reminders: reminders(),
         inbox: inbox(),
@@ -486,6 +493,8 @@ export const buildContainer = (env: CloudflareBindings) => {
         repository: new D1RoutinesRepository(db()),
         skinCare: skinCare(),
         reminders: reminders(),
+        checkIns: routineCheckInsRepository(),
+        inbox: inbox(),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
         enabled: env.ROUTINES_ENABLED === 'true',
         now: () => new Date(),

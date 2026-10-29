@@ -272,6 +272,15 @@ describe('RoutineCheckInsService.checkIn: which days are accepted', () => {
     expect(await outcome(day(-2))).toBe('refused')
   })
 
+  it('uses the UTC day for a stored zone Intl rejects, as Today does, instead of failing: a check-in for today is accepted and stored', async () => {
+    zone = 'Mars/Olympus_Mons'
+    setClock(11 * HOUR + 30 * MINUTE) // 23:30 UTC on the 15th: the next day in Lagos, but the zone cannot be read, so it is the 15th
+
+    expect(await outcome(day(0))).toBe('accepted')
+    expect(await outcome(day(1))).toBe('refused')
+    expect(await stored()).toEqual([`${day(0)} morning`])
+  })
+
   it('stores nothing for a refused day', async () => {
     await outcome(day(1))
     await outcome(day(-2))

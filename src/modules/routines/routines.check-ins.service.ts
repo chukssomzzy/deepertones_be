@@ -1,6 +1,6 @@
 import { requireUser } from '../../lib/context'
 import { ConflictError, ForbiddenError, ValidationError } from '../../lib/errors'
-import { localDay } from '../../lib/local-day'
+import { localDay, usableZone } from '../../lib/local-day'
 import type { InboxService } from '../inbox/inbox.service'
 import { dueOnDay } from '../catalog/catalog.frequency'
 import { allDoneText } from '../notifications/notifications.copy'
@@ -61,7 +61,8 @@ export class RoutineCheckInsService {
     const startedOn = (await this.versions.current(profileId))?.startedOn
     if (!startedOn) throw new ConflictError('ROUTINE_NOT_STARTED', 'Start your routine first')
     const now = this.now()
-    const today = localDay(now, await this.reminders.zoneFor(profileId))
+    // A stored zone Intl cannot read is the UTC day, as Today reads it: the slide must not fail where the screen renders.
+    const today = localDay(now, usableZone(now, await this.reminders.zoneFor(profileId)))
     if (!RoutineCheckInsService.isDate(day) || (day !== today && day !== RoutineCheckInsService.shift(today, -1)) || day < RoutineCheckInsService.dateOf(startedOn)) {
       throw new ValidationError('VALIDATION_FAILED', 'day must be today or yesterday, and not before your first day')
     }

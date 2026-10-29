@@ -2270,6 +2270,421 @@
           "inYourRoutine"
         ]
       },
+      "Today": {
+        "type": "object",
+        "properties": {
+          "started": {
+            "type": "boolean",
+            "description": "Whether the routine in force has a day 1 (Start was tapped). False with no routine, with one a safety change hides, and with one not started."
+          },
+          "day": {
+            "type": "string",
+            "description": "The person's local day, `YYYY-MM-DD`: their stored time zone's, else UTC (also for a stored zone that cannot be used).",
+            "example": "2030-06-15"
+          },
+          "startsOn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Day 1, `YYYY-MM-DD`, once started. Start makes tomorrow day 1, so on the day of the tap it is ahead of `day`."
+          },
+          "week": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The week of the plan, counted from day 1 with no cap. Null before day 1 and when not started."
+          },
+          "card": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "text"
+            ],
+            "description": "The reviewed card for the week, written for the current goal and for a step-down when the team has written one. Null before day 1, and when no card is approved for the week."
+          },
+          "half": {
+            "type": "string",
+            "enum": [
+              "morning",
+              "evening"
+            ],
+            "description": "The current half of the local day: morning before 15:00, evening from 15:00. Fixed; not the reminder times."
+          },
+          "current": {
+            "type": "object",
+            "properties": {
+              "done": {
+                "type": "boolean",
+                "description": "Whether the person ticked this half off today (`POST /api/v1/me/routine/check-ins`)."
+              },
+              "entries": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TodayEntry"
+                },
+                "description": "What is due in this half today, in routine order. A paused or held step, an as-needed step and a step on its rest day are left out."
+              }
+            },
+            "required": [
+              "done",
+              "entries"
+            ],
+            "description": "The current half."
+          },
+          "other": {
+            "type": "object",
+            "properties": {
+              "done": {
+                "type": "boolean",
+                "description": "Whether the person ticked this half off today (`POST /api/v1/me/routine/check-ins`)."
+              },
+              "entries": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TodayEntry"
+                },
+                "description": "What is due in this half today, in routine order. A paused or held step, an as-needed step and a step on its rest day are left out."
+              }
+            },
+            "required": [
+              "done",
+              "entries"
+            ],
+            "description": "The other half of the day."
+          },
+          "allDone": {
+            "type": "boolean",
+            "description": "Both halves ticked off today."
+          },
+          "stepDowns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "entryId": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "step": {
+                  "type": "integer"
+                },
+                "of": {
+                  "type": "integer"
+                },
+                "line": {
+                  "type": "string",
+                  "example": "Step-down: step 1 of 3"
+                }
+              },
+              "required": [
+                "entryId",
+                "title",
+                "step",
+                "of",
+                "line"
+              ]
+            },
+            "description": "Each step-down that is running, with where it is."
+          },
+          "checkInsDue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "pauseId": {
+                  "type": "string",
+                  "description": "The pause the check-in answers (`POST /api/v1/me/skin-care/pauses/{id}/check-in`)."
+                },
+                "step": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "cleanse",
+                    "treat",
+                    "moisturise",
+                    "protect",
+                    null
+                  ],
+                  "description": "Null for the check-in that has no step (nothing could be paused)."
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The routine's title for the step; null with no step."
+                },
+                "checkDay": {
+                  "type": "string",
+                  "example": "2030-06-18"
+                }
+              },
+              "required": [
+                "pauseId",
+                "step",
+                "title",
+                "checkDay"
+              ]
+            },
+            "description": "The check-ins after a pause that are due, until answered."
+          },
+          "hold": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "title": {
+                "type": "string",
+                "enum": [
+                  "See a professional"
+                ]
+              }
+            },
+            "required": [
+              "title"
+            ],
+            "description": "Set while a hold is open."
+          },
+          "bringingBack": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "step": {
+                  "type": "string",
+                  "enum": [
+                    "cleanse",
+                    "treat",
+                    "moisturise",
+                    "protect"
+                  ]
+                },
+                "title": {
+                  "type": "string"
+                },
+                "rung": {
+                  "type": "integer"
+                },
+                "of": {
+                  "type": "integer"
+                },
+                "line": {
+                  "type": "string",
+                  "example": "Bringing back Serum: step 2 of 3"
+                }
+              },
+              "required": [
+                "step",
+                "title",
+                "rung",
+                "of",
+                "line"
+              ]
+            },
+            "description": "Each step being brought back after a pause, on rest days too."
+          },
+          "paused": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "pauseId": {
+                  "type": "string",
+                  "description": "The pause, as in `checkInsDue`."
+                },
+                "step": {
+                  "type": "string",
+                  "enum": [
+                    "cleanse",
+                    "treat",
+                    "moisturise",
+                    "protect"
+                  ]
+                },
+                "title": {
+                  "type": "string",
+                  "description": "The routine's title for the step."
+                },
+                "checkDay": {
+                  "type": "string",
+                  "description": "The day the person is asked how the skin is, `YYYY-MM-DD`.",
+                  "example": "2030-06-18"
+                }
+              },
+              "required": [
+                "pauseId",
+                "step",
+                "title",
+                "checkDay"
+              ]
+            },
+            "description": "Each step that is paused (or being held for a professional) and so left out of the halves, with the day it is checked."
+          },
+          "remindersOff": {
+            "type": "boolean",
+            "description": "True when reminders are not switched on: show the banner."
+          },
+          "inbox": {
+            "type": "object",
+            "properties": {
+              "unread": {
+                "type": "integer"
+              },
+              "latest": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string"
+                    },
+                    "day": {
+                      "type": "string",
+                      "example": "2030-06-15"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "body": {
+                      "type": "string"
+                    },
+                    "link": {
+                      "type": "string",
+                      "description": "An in-app path to open when the item is tapped.",
+                      "example": "/routine"
+                    },
+                    "read": {
+                      "type": "boolean"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "day",
+                    "title",
+                    "body",
+                    "link",
+                    "read",
+                    "createdAt"
+                  ]
+                },
+                "description": "The newest five items, newest first, read or not."
+              }
+            },
+            "required": [
+              "unread",
+              "latest"
+            ]
+          }
+        },
+        "required": [
+          "started",
+          "day",
+          "startsOn",
+          "week",
+          "card",
+          "half",
+          "current",
+          "other",
+          "allDone",
+          "stepDowns",
+          "checkInsDue",
+          "hold",
+          "bringingBack",
+          "paused",
+          "remindersOff",
+          "inbox"
+        ]
+      },
+      "TodayEntry": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "string",
+            "enum": [
+              "cleanse",
+              "treat",
+              "moisturise",
+              "protect"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "description": "The product in plain words (\"Gel cleanser\", \"Niacinamide serum\", \"Sunscreen\"): a capital, no full stop."
+          },
+          "when": {
+            "type": "string",
+            "description": "How often, in words for the card: \"Every day\", \"Every other evening\", \"Once a week\" or \"When you need it\"."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, in words for the user."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "bringing-back"
+            ],
+            "description": "`active`, or `bringing-back` for a step used again at a gentler pace after a pause. A paused or held step is not listed."
+          },
+          "product": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RoutineOwnProduct"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineRecommendedProduct"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineNoProduct"
+              }
+            ],
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "own": "#/components/schemas/RoutineOwnProduct",
+                "recommended": "#/components/schemas/RoutineRecommendedProduct",
+                "none": "#/components/schemas/RoutineNoProduct"
+              }
+            }
+          }
+        },
+        "required": [
+          "step",
+          "title",
+          "when",
+          "reason",
+          "status",
+          "product"
+        ],
+        "description": "One card of a half of the day: the routine's entry, without `changed`."
+      },
       "CheckIn": {
         "type": "object",
         "properties": {
@@ -3201,6 +3616,74 @@
           "outcome",
           "response",
           "pause"
+        ]
+      },
+      "CloseHoldResult": {
+        "type": "object",
+        "properties": {
+          "closed": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "checkInsDue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "The pause's id, for the check-in route."
+                },
+                "step": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "cleanse",
+                    "treat",
+                    "moisturise",
+                    "protect",
+                    null
+                  ],
+                  "description": "Null for the check-in with no step."
+                },
+                "checkDay": {
+                  "type": "string",
+                  "description": "The local day it is due, `YYYY-MM-DD`: today or earlier.",
+                  "example": "2030-06-15"
+                }
+              },
+              "required": [
+                "id",
+                "step",
+                "checkDay"
+              ]
+            },
+            "description": "The check-ins due on the day of the close: the steps the hold kept out, each due today, and any other check-in already due."
+          }
+        },
+        "required": [
+          "closed",
+          "checkInsDue"
+        ]
+      },
+      "CloseHoldBody": {
+        "type": "object",
+        "properties": {
+          "how": {
+            "type": "string",
+            "enum": [
+              "seen",
+              "settled"
+            ],
+            "description": "How the hold ends: `seen` (the person saw a professional) or `settled` (the skin has settled)."
+          }
+        },
+        "required": [
+          "how"
         ]
       },
       "FaceConsentGivenResponse": {
@@ -8042,6 +8525,109 @@
         }
       }
     },
+    "/api/v1/me/today": {
+      "get": {
+        "operationId": "getToday",
+        "tags": [
+          "Routine"
+        ],
+        "summary": "Today: the week of the plan, the current half of the day's steps, and what needs an answer",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. Reads only: it asks for no build and marks nothing shown. Computed for the person's local day (their stored time zone, else UTC). `week` counts from day 1 with no cap, and `card` is the reviewed card for it, written for the current goal and for a step-down when the team has written one (null when none is approved). `half` is `morning` before 15:00 local and `evening` from then, whatever the reminder times; `current` is that half and `other` the other, each with the entries due today (a paused or held step, an as-needed step and a step on its rest day are left out) and whether it was ticked off with `POST /api/v1/me/routine/check-ins`. `stepDowns`, `bringingBack`, `checkInsDue` and `hold` carry the lines the screen shows. Before the routine is started, or on the day Start was tapped (day 1 is tomorrow), there is no week, card or entry, but a hold, a check-in that is due, `remindersOff` and the inbox are still answered. When skin-care cannot be read the whole read fails rather than show a paused step as active.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Today",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Today"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/me/routine/check-ins": {
       "post": {
         "operationId": "checkInRoutine",
@@ -9063,7 +9649,7 @@
           "Skin care"
         ],
         "summary": "Say how a paused step feels",
-        "description": "The answer to the check-in on a pause, from its check day on (409 `CHECK_IN_NOT_DUE` before it). `calmer` on a step brings it back on a gentle ladder: the pause becomes `bringing-back`, the routine shows the step on its first rung and an inbox row says so; on the check-in with no step it ends. `same` keeps the step paused and asks again three days from today, and the third `same` in a row goes to a professional. `worse` goes to a professional. A professional result sets the pause to `escalated`: it is never asked again and the routine keeps the step out. `response` is the reviewed text with `{step}` filled, or the reviewed professional text. A reviewed text or ladder the team has not written is 503 `CONTENT_UNAVAILABLE`, and the pause is as it was. 400 `VALIDATION_FAILED` for any other answer. 404 `PAUSE_NOT_FOUND` for another account's pause, an id nobody holds, and a pause that is not `paused`. 401 without a session and 403 `SIGNUP_REQUIRED` for a guest, both before the body is read.",
+        "description": "The answer to the check-in on a pause, from its check day on (409 `CHECK_IN_NOT_DUE` before it). `calmer` on a step brings it back on a gentle ladder: the pause becomes `bringing-back`, the routine shows the step on its first rung and an inbox row says so; on the check-in with no step it ends. `same` keeps the step paused and asks again three days from today, and the third `same` in a row goes to a professional. `worse` goes to a professional. While an escalation hold is open, `calmer` and `same` on a step the hold keeps out are 409 `HOLD_OPEN` (503 `ROUTINE_UNAVAILABLE` if the routine cannot be read, so it cannot be told); close the hold first. A professional result sets the pause to `escalated`: it is never asked again and the routine keeps the step out. `response` is the reviewed text with `{step}` filled, or the reviewed professional text. A reviewed text or ladder the team has not written is 503 `CONTENT_UNAVAILABLE`, and the pause is as it was. 400 `VALIDATION_FAILED` for any other answer. 404 `PAUSE_NOT_FOUND` for another account's pause, an id nobody holds, and a pause that is not `paused`. 401 without a session and 403 `SIGNUP_REQUIRED` for a guest, both before the body is read.",
         "security": [
           {
             "bearerAuth": []
@@ -9171,6 +9757,129 @@
           },
           "409": {
             "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/skin-care/hold/close": {
+      "post": {
+        "operationId": "closeEscalationHold",
+        "tags": [
+          "Skin care"
+        ],
+        "summary": "Close the escalation hold",
+        "description": "A professional result (a red-flag log, a harm log with two steps already paused, a worse or unchanged check-in) keeps the steps with an active ingredient out of the routine as `held`, until the person closes the hold: `seen` (they saw a professional) or `settled` (the skin has settled). Each held step is then due a check-in the same day: an escalated pause is `paused` again (its \"about the same\" count cleared), an open pause is due today, a step being brought back is paused again (its ladder is kept, and Calmer starts it again at the first rung), and a held step with no pause gets one (it cannot be undone). `checkInsDue` lists what is due today. 503 `ROUTINE_UNAVAILABLE` when the routine cannot be read (which steps are held is then unknown): the hold stays open and the request can be repeated. 404 `HOLD_NOT_FOUND` for an account with no open hold, and for the second of two closes. 400 `VALIDATION_FAILED` for any other body. 401 without a session and 403 `SIGNUP_REQUIRED` for a guest, both before the body is read.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloseHoldBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The hold, closed, and the check-ins due today",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/CloseHoldResult"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {

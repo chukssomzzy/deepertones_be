@@ -345,6 +345,31 @@ describe('RemindersService.enabledFor', () => {
   })
 })
 
+// zoneAndEnabledFor(profileId): Promise<{ zone: string | null; enabled: boolean }>   the two by-profile-id reads Today makes, from one read of the settings (#233 PR 7): the defaults (no zone, off) with no row.
+describe('RemindersService.zoneAndEnabledFor', () => {
+  const both = (profileId: string) => runAs(SYSTEM, () => service.zoneAndEnabledFor(profileId))
+
+  it('is no zone and off for a profile that never saved anything, and for one that does not exist', async () => {
+    expect(await both(AMARA)).toEqual({ zone: null, enabled: false })
+    expect(await both('profile-nobody')).toEqual({ zone: null, enabled: false })
+  })
+
+  it('is what zoneFor and enabledFor answer, together', async () => {
+    await update(AMARA_ACTOR, { enabled: true, timeZone: 'Africa/Lagos' })
+
+    expect(await both(AMARA)).toEqual({ zone: await zoneFor(AMARA), enabled: await enabledFor(AMARA) })
+    expect(await both(AMARA)).toEqual({ zone: 'Africa/Lagos', enabled: true })
+  })
+
+  it('reads the settings once', async () => {
+    const get = vi.spyOn(repository, 'get')
+
+    await both(AMARA)
+
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+})
+
 // --- the switches and the channel by profile id (spec #217, PR 4c) ---
 
 describe.each([
