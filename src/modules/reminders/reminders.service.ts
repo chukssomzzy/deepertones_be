@@ -131,7 +131,6 @@ export class RemindersService {
     return { ...patch, enabledOn: localDay(this.now(), zone) }
   }
 
-  // Copy awaiting the owner's sign-off.
   private async writeRemindersOff(profileId: string, day: string): Promise<void> {
     try {
       await this.inbox.write({
