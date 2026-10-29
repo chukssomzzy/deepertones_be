@@ -1,4 +1,4 @@
-import type { ShelfRemoveResult, ShelfRepository } from './shelf.repository'
+import type { ShelfRemoveManyResult, ShelfRemoveResult, ShelfRepository } from './shelf.repository'
 import type { FakeShelfStore } from './shelf.store.fake'
 import type { ShelfEntryRow, ShelfRemovedReason } from './shelf.types'
 
@@ -35,5 +35,18 @@ export class FakeShelfRepository implements ShelfRepository {
     row.removedAt = at
     row.removedReason = reason
     return 'removed'
+  }
+
+  async removeMany(profileId: string, entryIds: string[], reason: ShelfRemovedReason | null, at: Date): Promise<ShelfRemoveManyResult> {
+    const rows = [...new Set(entryIds)].map((id) => this.store.rows.find((candidate) => candidate.id === id && candidate.profileId === profileId))
+    if (rows.some((row) => !row)) return { status: 'not-found' }
+    const removedIds: string[] = []
+    for (const row of rows) {
+      if (!row || row.removedAt !== null) continue
+      row.removedAt = at
+      row.removedReason = reason
+      removedIds.push(row.id)
+    }
+    return { status: 'removed', removedIds }
   }
 }
