@@ -38,7 +38,7 @@ type RowIds = Map<string, string>
 /** Everything one inbox row needs but the profile, which is the same for every row of a run. */
 type Row = Omit<InboxWrite, 'profileId'>
 
-// Copy awaiting the owner's sign-off (the fixed text of the rest night and the next change: short, kind and generic by design). It passes FORBIDDEN_WORDING, which InboxService.write enforces.
+// The fixed text of the rest night and the next change, signed off by the owner: short, kind and generic by design. It passes FORBIDDEN_WORDING, which InboxService.write enforces.
 const REST_NIGHT_TEXT = { title: 'A rest night', body: 'Nothing is due this evening. Your skin gets a night off.' }
 const NEXT_CHANGE_TEXT = { title: 'A change is coming', body: 'A step in your routine changes tomorrow. Have a look at what is new.' }
 
