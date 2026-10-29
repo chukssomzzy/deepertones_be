@@ -8,9 +8,9 @@ import type { FitRequest, FitResult } from '../../providers/verdict-fitting/verd
 import { MemoryVerdictFitter } from '../../providers/verdict-fitting/memory.verdict-fitter'
 import type { ShelfFacts } from '../catalog/catalog.service'
 import type { TaperRow } from '../catalog/catalog.workbook.schema'
-import type { CatalogWorkbookService, VerdictReference } from '../catalog/catalog.workbook.service'
+import type { CatalogWorkbookService, Escalation, VerdictReference } from '../catalog/catalog.workbook.service'
 import type { ProductCatalogService } from '../catalog/catalog.service'
-import type { Category, RoutineStep, TaperKind } from '../catalog/catalog.vocabulary'
+import type { Category, EscalationReason, RoutineStep, TaperKind } from '../catalog/catalog.vocabulary'
 import type { FaceScanService } from '../face-scans/face-scans.service'
 import type { Band, ShownConcern, SkinTypeLabel } from '../face-scans/face-scans.tables'
 import type { GoalsService } from '../goals/goals.service'
@@ -22,6 +22,7 @@ import type { NoLabelPurpose } from '../scans/scans.vocabulary'
 import type { ShelfActiveEntry, ShelfEntryView, ShelfService } from '../shelf/shelf.service'
 import type { z } from 'zod'
 import type { buildVerdictSpec } from './verdicts.job-specs'
+import { FORBIDDEN_WORDING } from '../routines/routines.wording'
 import { FakeVerdictsRepository } from './verdicts.repository.fake'
 import { VerdictService } from './verdicts.service'
 import type { RoutineTrigger } from '../routines/routines.trigger'
@@ -41,6 +42,10 @@ import type { RoutineTrigger } from '../routines/routines.trigger'
 //                  included) of the step-down codes the products use, and is [] when none is used.
 //   build(body)    runs the build-verdict job. requeueDueFits(now) answers how many retries it queued. markFitFailed(body) is the dead-letter hook.
 //   savedFor(profileId)   answers null, or { fingerprint, fit, builtAt, rulesVersion, products }.
+//   #259 A3: each saved product carries `basis` (where its verdict came from), a SNAPSHOT of the approved rule or claim word as it was when the verdict was built, and
+//   the full verdict carries `professional` (the approved 'about-a-product' escalation, read each time, or null while the workbook has no such row). The service takes
+//   one new dependency: `workbook.escalationFor`. The fingerprint is hashed with a verdict format version (VERDICT_FORMAT_VERSION), so every verdict saved before the
+//   version existed is stale once: reached here the way life reaches it, by a saved row whose fingerprint is not the current one and whose products have no basis.
 //   The product of a shelf entry (spec #171 follow-up): what a client reads has, on each product, the shelf entry's own `kind` and `product` or `noLabel`, joined at read time
 //   by `shelf.viewsFor(profileId, entryIds)` (by profile id, no session). What is saved and what `savedFor` answers never carries them, and nothing in the fingerprint changes.
 //   A product whose view no longer resolves is NEVER left out (it could be a mercury escalation or a steroid stop): it stays with its saved entryId, group, verdict,
@@ -72,6 +77,10 @@ const PUBLIC: Actor = { kind: 'public' }
 const CLEAN = ['Aqua', 'Glycerin', 'Cetearyl Alcohol']
 const STEROID = ['Aqua', 'Clobetasol Propionate']
 const STEROID_SOURCE = 'https://example.org/rules/clobetasol'
+// #259 A3: the words, source link and reviewer role the steroid rule is approved with, which the verdict snapshots into each product's `basis`.
+const STEROID_STATEMENT = 'A strong steroid that needs a prescription.'
+const STEROID_ROLE = 'a consultant dermatologist'
+const PROFESSIONAL: Escalation = { whoToSee: 'A pharmacist or a doctor.', howSoon: 'Within a few days.', whatToTellThem: 'The product, how long you used it, and what changed.' }
 
 // ---- the world the other services answer from ----
 
@@ -115,6 +124,8 @@ type World = {
   /** The profile id every read was made for, and the codes tapersByCode was asked for. */
   profilesRead: string[]
   tapersAsked: string[][]
+  /** The approved escalation of each reason the workbook has a row for; one that is absent has not been imported yet. */
+  escalations: Map<EscalationReason, Escalation>
 }
 
 const safetyView = (choices: SafetyChoice[], over: Partial<SafetyView> = {}): SafetyView => ({
@@ -148,7 +159,7 @@ const newWorld = (): World => ({
     catalogVersion: 1,
     rules: [
       rule({ name: 'niacinamide', kind: 'irritation', source: 'https://example.org/rules/niacinamide', helps: ['hd_radiance'] }),
-      rule({ name: 'clobetasol propionate', aliases: ['clobetasol'], kind: 'banned-substance', group: 'steroid', source: STEROID_SOURCE }),
+      rule({ name: 'clobetasol propionate', aliases: ['clobetasol'], kind: 'banned-substance', group: 'steroid', source: STEROID_SOURCE, rule: STEROID_STATEMENT, reviewerRole: STEROID_ROLE }),
       rule({ name: 'hydroquinone', kind: 'restricted-substance', group: 'lightening-agent', source: 'https://example.org/rules/hydroquinone' }),
     ],
     claimPhrases: ['whitening'],
@@ -176,6 +187,7 @@ const newWorld = (): World => ({
   ]),
   profilesRead: [],
   tapersAsked: [],
+  escalations: new Map(),
 })
 
 let world: World
@@ -288,7 +300,8 @@ beforeEach(() => {
       stepsFor: async (productIds: string[]) => new Map(productIds.flatMap((id): [string, RoutineStep[]][] => (world.steps.has(id) ? [[id, [...world.steps.get(id)!]]] : []))),
       skinConcernsFor: async (productIds: string[]) =>
         new Map(productIds.flatMap((id): [string, ShownConcern[]][] => (world.skinConcerns.has(id) ? [[id, [...world.skinConcerns.get(id)!]]] : []))),
-    } satisfies Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor' | 'skinConcernsFor'>,
+      escalationFor: async (reason: EscalationReason) => structuredClone(world.escalations.get(reason) ?? null),
+    } satisfies Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor' | 'skinConcernsFor' | 'escalationFor'>,
     catalog: {
       shelfFacts: async (formulationIds: string[]) => new Map(formulationIds.flatMap((id): [string, ShelfFacts][] => (world.facts.has(id) ? [[id, structuredClone(world.facts.get(id)!)]] : []))),
       latestIngredients: async (productId: string) => world.mentionIngredients.get(productId) ?? null,
@@ -572,7 +585,7 @@ describe('VerdictService.build: a verdict from the shelf', () => {
     await built()
 
     expect(fitter.calls).toEqual([])
-    expect(await current()).toEqual({ status: 'ready', locked: false, fit: 'ready', products: [], tapers: [] })
+    expect(await current()).toEqual({ status: 'ready', locked: false, fit: 'ready', products: [], tapers: [], professional: null })
   })
 
   it('does nothing when the row is already built from this fingerprint: no second bill for the fit judge, and the saved verdict is untouched', async () => {
@@ -1354,11 +1367,13 @@ const amarasBody = (fit: 'ready' | 'not-ready') => ({
   fit,
   // #259 A2: the fixed group copy and each product's suggested lines; their words are pinned in verdicts.view.test.ts.
   groups: expect.any(Array),
+  // #259 A3: each product's basis and the professional to see (null until the workbook has the row); both are pinned in the A3 tests below.
+  professional: null,
   products: [
     fit === 'ready'
-      ? { entryId: 'entry-a', ...PRODUCT_A, group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false, suggest: expect.any(Array) }
-      : { entryId: 'entry-a', ...PRODUCT_A, group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, suggest: expect.any(Array) },
-    { entryId: 'entry-b', ...PRODUCT_B, group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false, suggest: expect.any(Array) },
+      ? { entryId: 'entry-a', ...PRODUCT_A, group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false, suggest: expect.any(Array), basis: expect.any(Array) }
+      : { entryId: 'entry-a', ...PRODUCT_A, group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, suggest: expect.any(Array), basis: expect.any(Array) },
+    { entryId: 'entry-b', ...PRODUCT_B, group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false, suggest: expect.any(Array), basis: expect.any(Array) },
   ],
   tapers: [STEROID_TAPER_BODY],
 })
@@ -1863,8 +1878,8 @@ describe('VerdictService: the shelf entry\'s product on each verdict product', (
 
   describe('when the view of an entry in the saved verdict no longer resolves (the shelf changed in the moment since it was built)', () => {
     /** What a client is shown of a product whose view is gone: the saved verdict as it was, and nothing of the shelf entry. */
-    const NO_VIEW_A = { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false, suggest: expect.any(Array) }
-    const NO_VIEW_B = { entryId: 'entry-b', ...PRODUCT_B, group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false, suggest: expect.any(Array) }
+    const NO_VIEW_A = { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false, suggest: expect.any(Array), basis: expect.any(Array) }
+    const NO_VIEW_B = { entryId: 'entry-b', ...PRODUCT_B, group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false, suggest: expect.any(Array), basis: expect.any(Array) }
     const noShelfEntry = (product: object) => {
       for (const joined of ['kind', 'product', 'noLabel']) expect(product).not.toHaveProperty(joined)
     }
@@ -1925,13 +1940,14 @@ describe('VerdictService: the shelf entry\'s product on each verdict product', (
       events.published.length = 0
       await watch()
       const snapshot = events.subscribed[0]!.snapshot as unknown as { products: object[]; tapers: object[] }
-      expect(snapshot.products).toEqual([{ entryId: 'entry-a', ...PRODUCT_A, group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false, suggest: expect.any(Array) }, {
+      expect(snapshot.products).toEqual([{ entryId: 'entry-a', ...PRODUCT_A, group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false, suggest: expect.any(Array), basis: expect.any(Array) }, {
         entryId: 'entry-b',
         group: 'likely-the-problem',
         verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' },
         reason: expect.any(String),
         escalate: false,
         suggest: expect.any(Array),
+        basis: expect.any(Array),
       }])
       expect(snapshot.tapers).toEqual([STEROID_TAPER_BODY])
     })
@@ -2301,7 +2317,7 @@ describe('VerdictService.current: a guest is given the locked preview, never the
     const view = (await current(TOLU)) as unknown as { locked: boolean; products: object[] }
 
     expect(view.locked).toBe(false)
-    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'professional', 'status', 'tapers'])
     expect(view.products).toHaveLength(2)
   })
 
@@ -2620,5 +2636,285 @@ describe('VerdictService.build: the routine trigger', () => {
     await built()
 
     expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+// #259 A3: where a verdict comes from (`basis`), the verdict format version, and "Talk to a professional"
+// How each floor fact becomes a basis is pinned in verdicts.basis.test.ts; this is what the SERVICE does with it: saves it with the product, never looks it up
+// again, serves it, rebuilds an older format once, and adds `professional` to the full verdict and never to a guest's preview.
+
+const FIT_BASIS = { kind: 'fit', line: 'Matched against your goal by our checker.' }
+const STEROID_BASIS = { kind: 'rule', source: 'ingredient-rule', statement: STEROID_STATEMENT, sourceUrl: STEROID_SOURCE, reviewerRole: STEROID_ROLE, line: STEROID_STATEMENT }
+const steroidRule = () => world.reference.rules.find((r) => r.name === 'clobetasol propionate')!
+type WithBasis = { entryId: string; basis: Record<string, unknown>[] }
+const basisIn = (view: unknown, entryId: string): Record<string, unknown>[] => {
+  const found = (view as { products: WithBasis[] }).products.find((p) => p.entryId === entryId)
+  if (!found) throw new Error(`no product ${entryId}`)
+  return found.basis
+}
+
+describe('VerdictService: the basis saved with each product', () => {
+  it('saves each product\'s basis when the verdict is built and serves it: the rule that stepped the steroid cream down, and the fit for the serum the judge decided', async () => {
+    await built()
+
+    const view = await current()
+
+    expect(basisIn(view, 'entry-b')).toEqual([STEROID_BASIS])
+    expect(basisIn(view, 'entry-a')).toEqual([FIT_BASIS])
+  })
+
+  it('gives the routine the same basis in what it reads, and the same basis on the full frame a build sends', async () => {
+    await built()
+
+    const saved = await savedFor('profile-amara-1')
+
+    expect(saved!.products.map((p) => [p.entryId, (p as unknown as WithBasis).basis])).toEqual([['entry-a', [FIT_BASIS]], ['entry-b', [STEROID_BASIS]]])
+    const [frame] = events.eventsFor(KEY) as unknown as { verdict: unknown }[]
+    expect(basisIn(frame!.verdict, 'entry-b')).toEqual([STEROID_BASIS])
+  })
+
+  it('has no basis for a product the judge has not decided, and the floor\'s basis for the steroid cream beside it, when the judge failed', async () => {
+    await current()
+    fitFails()
+    await expect(build(lastBody())).rejects.toThrow()
+
+    const view = await current()
+
+    expect(basisIn(view, 'entry-a')).toEqual([])
+    expect(basisIn(view, 'entry-b')).toEqual([STEROID_BASIS])
+  })
+
+  it('passes a reviewer role of null on as null, with the property there: what a rule stored before contract 2.4.0 reads as', async () => {
+    steroidRule().reviewerRole = null
+
+    await built()
+
+    const [basis] = basisIn(await current(), 'entry-b')
+    expect(basis).toEqual({ ...STEROID_BASIS, reviewerRole: null })
+    expect(basis).toHaveProperty('reviewerRole', null)
+  })
+
+  it('names the claim word, with its source link and reviewer role, of a product whose name makes a lightening claim', async () => {
+    addProduct('entry-w', CLEAN, { name: 'Whitening Glow Cream' })
+
+    await built()
+
+    const [basis] = basisIn(await current(), 'entry-w')
+    expect(basis).toEqual({
+      kind: 'rule',
+      source: 'claim-word',
+      statement: expect.stringContaining('whitening'),
+      sourceUrl: 'https://example.org/claims/whitening',
+      reviewerRole: 'a pharmacist',
+      line: expect.any(String),
+    })
+    expect(basis!.line).toBe(basis!.statement)
+  })
+
+  it('says it came from what the user told us for a product they reacted to', async () => {
+    addProduct('entry-r', CLEAN, { name: 'Night Cream' })
+    world.safety.mentions = [mention({ kind: 'product', name: 'Night Cream', productId: 'prod-entry-r', resolution: 'resolved' })]
+
+    await built()
+
+    expect(basisIn(await current(), 'entry-r')).toEqual([{ kind: 'told-us', about: 'reaction', line: 'You told us your skin reacted to this product.' }])
+  })
+
+  it('says, for a no-label product, that its contents are unknown', async () => {
+    world.entries.push({ id: 'entry-n', kind: 'no-label', addedAt: at(entryCount++ * MINUTE), itemId: 'item-entry-n' })
+    world.noLabels.set('item-entry-n', { purpose: 'moisturise', category: 'skin' })
+    world.views.set('entry-n', noLabelView('entry-n'))
+
+    await built()
+
+    expect(basisIn(await current(), 'entry-n')).toEqual([{ kind: 'no-label', about: 'unknown-contents', line: expect.any(String) }])
+  })
+})
+
+describe('VerdictService: the basis is a snapshot', () => {
+  it('does not look the rule up again at read time: a later change of its reviewer role leaves the saved basis as it was, with no new build and no new judge call', async () => {
+    await built()
+    steroidRule().reviewerRole = 'a nurse'
+
+    const view = await current()
+
+    // The role is no input of the fingerprint (owner decision, #171: catalog-only edits do not rebuild), so the verdict is still current.
+    expect(view).toMatchObject({ status: 'ready' })
+    expect(basisIn(view, 'entry-b')).toEqual([STEROID_BASIS])
+    expect(jobs.enqueued).toHaveLength(1)
+    expect(fitter.calls).toHaveLength(1)
+  })
+
+  it('does not look a claim word up again either: a later change of its reviewer role or source link leaves the saved basis as it was', async () => {
+    addProduct('entry-w', CLEAN, { name: 'Whitening Glow Cream' })
+    await built()
+    const before = basisIn(await current(), 'entry-w')
+    world.reference.claimWords = [{ phrase: 'whitening', sourceUrl: null, reviewerRole: null }]
+
+    const view = await current()
+
+    expect(view).toMatchObject({ status: 'ready' })
+    expect(basisIn(view, 'entry-w')).toEqual(before)
+    expect(before[0]).toMatchObject({ reviewerRole: 'a pharmacist', sourceUrl: 'https://example.org/claims/whitening' })
+    expect(jobs.enqueued).toHaveLength(1)
+  })
+
+  it('takes the rule as it is then when the verdict is rebuilt: a changed statement makes the verdict stale, and the rebuilt verdict says the new words', async () => {
+    await built()
+    steroidRule().rule = 'A strong steroid; use only as prescribed.'
+
+    expect(await current()).toEqual({ status: 'pending' })
+    await build(lastBody())
+
+    expect(basisIn(await current(), 'entry-b')).toEqual([
+      { ...STEROID_BASIS, statement: 'A strong steroid; use only as prescribed.', line: 'A strong steroid; use only as prescribed.' },
+    ])
+  })
+})
+
+describe('VerdictService: a verdict saved in an earlier format', () => {
+  it('treats a verdict saved before the basis existed as stale once: the next read is pending and queues one build, which rebuilds it with its basis, and then it settles with no loop', async () => {
+    await built()
+    const row = await rowOf()
+    // A row an earlier release saved: its products have no basis, and its fingerprint is not one the current format produces (the fingerprint test shows that
+    // the format version is part of the hash, which is what makes every such row stale).
+    const { profileId, status, requestedAt, ...saved } = row
+    await repository.save(profileId, { ...saved, fingerprint: 'e'.repeat(64), products: row.products.map(({ basis, ...rest }: Record<string, unknown>) => rest) as never, fit: 'ready', builtAt: row.builtAt!, inputs: row.inputs! })
+    expect(fitter.calls).toHaveLength(1)
+
+    expect(await current()).toEqual({ status: 'pending' })
+    expect(await savedFor('profile-amara-1')).toBeNull()
+    expect(jobs.enqueued).toHaveLength(2)
+    await build(lastBody())
+
+    expect(fitter.calls).toHaveLength(2)
+    const view = await current()
+    expect(basisIn(view, 'entry-b')).toEqual([STEROID_BASIS])
+    expect(basisIn(view, 'entry-a')).toEqual([FIT_BASIS])
+    // Settled: asking again changes nothing and queues nothing, and the same message run again does not call the judge.
+    expect(await current()).toEqual(view)
+    await build(lastBody())
+    expect(jobs.enqueued).toHaveLength(2)
+    expect(fitter.calls).toHaveLength(2)
+    expect((await rowOf()).fingerprint).toBe(lastBody().fingerprint)
+    // The rebuilt verdict is current when it is saved: the stream is told it, and done, and never pending.
+    expect(JSON.stringify(events.eventsFor(KEY))).not.toContain('"pending"')
+  })
+})
+
+describe('VerdictService: "Talk to a professional" on the full verdict', () => {
+  it('is null while the workbook has no approved about-a-product row: nothing is made up', async () => {
+    await built()
+
+    const view = await current()
+
+    expect(view).toHaveProperty('professional', null)
+  })
+
+  it('is the approved about-a-product row as it is: who to see, how soon, and what to tell them', async () => {
+    world.escalations.set('about-a-product', PROFESSIONAL)
+    await built()
+
+    expect(await current()).toMatchObject({ status: 'ready', locked: false, professional: PROFESSIONAL })
+  })
+
+  it('asks for the about-a-product reason and no other', async () => {
+    const asked: string[] = []
+    const escalationFor = vi.fn(async (reason: EscalationReason) => (asked.push(reason), null))
+    service = new VerdictService({ ...verdictDeps, workbook: { ...(verdictDeps as { workbook: object }).workbook, escalationFor } } as never)
+
+    await built()
+    await current()
+
+    expect(new Set(asked)).toEqual(new Set(['about-a-product']))
+  })
+
+  it('shows a row imported after the verdict was built at once, with no new build: it is read when the verdict is read, not saved with it', async () => {
+    await built()
+    expect(await current()).toHaveProperty('professional', null)
+
+    world.escalations.set('about-a-product', PROFESSIONAL)
+
+    expect(await current()).toMatchObject({ professional: PROFESSIONAL })
+    expect(jobs.enqueued).toHaveLength(1)
+  })
+
+  it('is on the full frame a build sends, and the snapshot a stream opens with', async () => {
+    world.escalations.set('about-a-product', PROFESSIONAL)
+
+    await built()
+
+    const [frame] = events.eventsFor(KEY) as unknown as { verdict: { professional: unknown } }[]
+    expect(frame!.verdict.professional).toEqual(PROFESSIONAL)
+    await watch()
+    expect((events.subscribed.at(-1)!.snapshot as unknown as { professional: unknown }).professional).toEqual(PROFESSIONAL)
+  })
+
+  it('keeps the stronger wording of a product that escalates, as today', async () => {
+    addProduct('entry-m', ['Aqua', 'Mercuric Chloride'])
+    world.reference.rules.push(rule({ name: 'mercury', aliases: ['mercuric chloride'], kind: 'banned-substance', group: 'mercury', rule: 'Mercury compounds can poison the body.' }))
+    world.escalations.set('about-a-product', PROFESSIONAL)
+
+    await built()
+
+    // The lines are in the public body, which the build also sends to the stream.
+    const [frame] = events.eventsFor(KEY) as unknown as { verdict: { products: { entryId: string; escalate: boolean; suggest: string[] }[] } }[]
+    const mercury = frame!.verdict.products.find((p) => p.entryId === 'entry-m')!
+    expect(mercury.escalate).toBe(true)
+    expect(mercury.suggest.join(' ')).toMatch(/professional/i)
+  })
+})
+
+describe('VerdictService: a guest\'s locked preview has no basis and no professional', () => {
+  it('has neither field, nor any word of a basis or of the professional, however the row was built and whether or not the workbook has the row', async () => {
+    world.escalations.set('about-a-product', PROFESSIONAL)
+    await asGuestBuilt()
+
+    const preview = await current(NGOZI)
+
+    expect(preview).toMatchObject({ status: 'ready', locked: true })
+    expect(preview).not.toHaveProperty('professional')
+    expect(preview).not.toHaveProperty('products')
+    const raw = JSON.stringify(preview)
+    for (const hidden of ['basis', 'professional', 'whoToSee', PROFESSIONAL.whoToSee, STEROID_STATEMENT, STEROID_ROLE, STEROID_SOURCE, 'Matched against your goal']) expect(raw).not.toContain(hidden)
+  })
+
+  it('sends none on the preview stream, the snapshot or the frames, while the full stream of the same build carries both', async () => {
+    world.escalations.set('about-a-product', PROFESSIONAL)
+    await built(AMARA)
+
+    const preview = JSON.stringify(events.eventsFor(PREVIEW_KEY))
+    const full = JSON.stringify(events.eventsFor(KEY))
+
+    expect(events.eventsFor(PREVIEW_KEY).length).toBeGreaterThan(0)
+    for (const hidden of ['basis', 'professional', 'whoToSee', PROFESSIONAL.whoToSee, STEROID_STATEMENT, STEROID_ROLE]) expect(preview).not.toContain(hidden)
+    expect(full).toContain('"basis"')
+    expect(full).toContain(PROFESSIONAL.whoToSee)
+  })
+
+  it('opens a guest\'s stream with a snapshot that has neither', async () => {
+    world.escalations.set('about-a-product', PROFESSIONAL)
+    await asGuestBuilt()
+
+    await watch(NGOZI)
+
+    const snapshot = events.subscribed.at(-1)!.snapshot
+    expect(snapshot).toMatchObject({ locked: true })
+    expect(JSON.stringify(snapshot)).not.toMatch(/basis|professional|whoToSee/)
+  })
+})
+
+// Every fixed line passes the wording gate: the lines the service saves, read back from the public body.
+describe('VerdictService: the words of a saved basis', () => {
+  it('pass the wording gate, apart from the rule\'s own words (the workbook gates those when they are imported)', async () => {
+    addProduct('entry-n2', CLEAN, { name: 'Night Cream' })
+    world.safety.mentions = [mention({ kind: 'product', name: 'Night Cream', productId: 'prod-entry-n2', resolution: 'resolved' })]
+    await built()
+
+    const lines = ((await current()) as unknown as { products: WithBasis[] }).products.flatMap((p) => p.basis).filter((b) => b.kind !== 'rule').map((b) => String(b.line))
+
+    expect(lines.length).toBeGreaterThanOrEqual(2)
+    for (const line of lines) expect(FORBIDDEN_WORDING.filter(({ pattern }) => pattern.test(line)).map(({ code }) => code), line).toEqual([])
   })
 })

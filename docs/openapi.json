@@ -1217,6 +1217,9 @@
                   "$ref": "#/components/schemas/ShelfVerdictTaper"
                 },
                 "description": "The step-downs the `stop` verdicts use, each once."
+              },
+              "professional": {
+                "$ref": "#/components/schemas/ShelfVerdictProfessional"
               }
             },
             "required": [
@@ -1225,7 +1228,8 @@
               "fit",
               "groups",
               "products",
-              "tapers"
+              "tapers",
+              "professional"
             ]
           }
         ]
@@ -1432,6 +1436,13 @@
             ],
             "description": "Only on a `cant-tell` product: what to do to get it read."
           },
+          "basis": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShelfVerdictBasis"
+            },
+            "description": "Where the verdict comes from: every reason once, reviewed rules first. Empty for an `undecided` product, which the checker has not answered about yet. Copy awaiting the owner's sign-off."
+          },
           "suggest": {
             "type": "array",
             "items": {
@@ -1447,6 +1458,7 @@
           "verdict",
           "reason",
           "escalate",
+          "basis",
           "suggest"
         ]
       },
@@ -1529,6 +1541,133 @@
         ],
         "description": "What to do with the product: `keep` it, `reduce` it, `stop` it by a step-down, or `drop` it at once."
       },
+      "ShelfVerdictBasis": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rule"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "ingredient-rule",
+                  "claim-word"
+                ],
+                "description": "`ingredient-rule`: a reviewed rule about an ingredient the product holds. `claim-word`: a reviewed claim word the product's name makes."
+              },
+              "statement": {
+                "type": "string",
+                "description": "The rule's own words, or for a `claim-word` a fixed sentence naming the word. Shown as it is, and the same as `line`."
+              },
+              "sourceUrl": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A link to the source the rule rests on; null when it has none, and then the app shows no link."
+              },
+              "reviewerRole": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Who reviewed the rule, e.g. \"a consultant dermatologist\"; null for a rule stored before contract 2.4.0, and then the app shows no \"Reviewed by\" line."
+              },
+              "line": {
+                "type": "string",
+                "description": "The line to show, as it is."
+              }
+            },
+            "required": [
+              "kind",
+              "source",
+              "statement",
+              "sourceUrl",
+              "reviewerRole",
+              "line"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "fit"
+                ]
+              },
+              "line": {
+                "type": "string",
+                "description": "The line to show, as it is. Our checker's match against the goal, which is not a reviewed rule."
+              }
+            },
+            "required": [
+              "kind",
+              "line"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "told-us"
+                ]
+              },
+              "about": {
+                "type": "string",
+                "enum": [
+                  "reaction",
+                  "prescription"
+                ]
+              },
+              "line": {
+                "type": "string",
+                "description": "The line to show, as it is."
+              }
+            },
+            "required": [
+              "kind",
+              "about",
+              "line"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "no-label"
+                ]
+              },
+              "about": {
+                "type": "string",
+                "enum": [
+                  "purpose",
+                  "unknown-contents"
+                ]
+              },
+              "line": {
+                "type": "string",
+                "description": "The line to show, as it is."
+              }
+            },
+            "required": [
+              "kind",
+              "about",
+              "line"
+            ]
+          }
+        ],
+        "description": "One reason behind a verdict, for \"Where this comes from\". Saved with the product when the verdict is built, so a later edit to a rule does not change it."
+      },
       "ShelfVerdictTaper": {
         "type": "object",
         "properties": {
@@ -1591,6 +1730,32 @@
           "whatToExpect",
           "seeAProfessionalIf"
         ]
+      },
+      "ShelfVerdictProfessional": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "whoToSee": {
+            "type": "string",
+            "description": "What kind of professional to see."
+          },
+          "howSoon": {
+            "type": "string",
+            "description": "How soon to see them."
+          },
+          "whatToTellThem": {
+            "type": "string",
+            "description": "What to tell them."
+          }
+        },
+        "required": [
+          "whoToSee",
+          "howSoon",
+          "whatToTellThem"
+        ],
+        "description": "\"Talk to a professional\" about a product: who to see, how soon and what to tell them, from the reviewed workbook. Null until the team has imported it. Never on the locked preview."
       },
       "Routine": {
         "oneOf": [

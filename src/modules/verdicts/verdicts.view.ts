@@ -1,5 +1,6 @@
 import type { z } from '@hono/zod-openapi'
 import type { TaperRow } from '../catalog/catalog.workbook.schema'
+import type { Escalation } from '../catalog/catalog.workbook.service'
 import { toNoLabelResponse, toProductResponse } from '../scans/scans.presenter'
 import { DROP_SUGGESTION, ESCALATE_SUGGESTION, GROUP_COPY, GROUP_ORDER, KEEP_SUGGESTION, PHOTOGRAPH_SUGGESTION, reduceSuggestion, stopSuggestion } from './verdicts.screen-copy'
 import type { VerdictGroup } from './verdicts.merge'
@@ -11,11 +12,12 @@ export type VerdictPreview = { status: 'ready'; locked: true; fit: 'ready' | 'no
 
 /**
  * What GET /me/verdict answers: the build is on its way, or the saved verdict, in full with the step-down templates its stopped products use (retired ones
- * included) for a verified user, or as the locked preview for a guest.
+ * included) and the professional to see (null until the workbook has the row; read when the verdict is read, never saved) for a verified user, or as the
+ * locked preview for a guest.
  */
 export type VerdictView =
   | { status: 'pending' }
-  | { status: 'ready'; locked: false; fit: 'ready' | 'not-ready'; products: ShownVerdictProduct[]; tapers: TaperRow[] }
+  | { status: 'ready'; locked: false; fit: 'ready' | 'not-ready'; products: ShownVerdictProduct[]; tapers: TaperRow[]; professional: Escalation | null }
   | VerdictPreview
 
 // Every group is named so that a group added to the verdict is a compile error here, and a client always reads all of them.
@@ -55,10 +57,10 @@ const suggestionsFor = ({ group, verdict, escalate }: ShownVerdictProduct, taper
   return group === 'cant-tell' ? [...lines, PHOTOGRAPH_SUGGESTION] : lines
 }
 
-// Written out field by field: `facts`, `step` and `sourceUrls` are how the rules reached a verdict, not what the user is shown, and a field added to the saved
-// product later must not reach a client unless it is named here.
+// Written out field by field: `facts`, `step` and `sourceUrls` are how the rules reached a verdict, not what the user is shown (`basis` is the part of them written
+// for the user, and is named below), and a field added to the saved product later must not reach a client unless it is named here.
 const toProduct = (shown: ShownVerdictProduct, tapers: readonly TaperRow[]): PublicProduct => {
-  const { entryId, group, verdict, reason, escalate, sameJobAs, nudge } = shown
+  const { entryId, group, verdict, reason, escalate, basis, sameJobAs, nudge } = shown
   return {
     entryId,
     // The shelf entry's own, through the presenters GET /me/shelf uses, so the two bodies cannot drift.
@@ -71,6 +73,7 @@ const toProduct = (shown: ShownVerdictProduct, tapers: readonly TaperRow[]): Pub
     verdict: verdict.kind === 'stop' ? { kind: 'stop', taperCode: verdict.taperTemplateId } : verdict,
     reason,
     escalate,
+    basis,
     ...(sameJobAs === undefined ? {} : { sameJobAs }),
     ...(nudge === undefined ? {} : { nudge }),
     suggest: suggestionsFor(shown, tapers),
@@ -93,5 +96,5 @@ export const toShelfVerdictResponse = (view: VerdictView): z.infer<typeof ShelfV
   if (view.locked) return { ...view, groups: groupsOf(view.counts) }
   const counts = { ...NO_PRODUCTS }
   for (const { group } of view.products) counts[group]++
-  return { status: 'ready', locked: false, fit: view.fit, groups: groupsOf(counts), products: view.products.map((shown) => toProduct(shown, view.tapers)), tapers: view.tapers.map(toTaper) }
+  return { status: 'ready', locked: false, fit: view.fit, groups: groupsOf(counts), products: view.products.map((shown) => toProduct(shown, view.tapers)), tapers: view.tapers.map(toTaper), professional: view.professional && { whoToSee: view.professional.whoToSee, howSoon: view.professional.howSoon, whatToTellThem: view.professional.whatToTellThem } }
 }

@@ -19,7 +19,7 @@ import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
 import { FORBIDDEN_WORDING } from '../../src/modules/routines/routines.wording'
-import { applied, code, ruleRow, taperRow, word } from './admin.catalog.support'
+import { applied, claimWordRow, code, escalationRow, REVIEWER_ROLE, ruleRow, taperRow, word } from './admin.catalog.support'
 
 // GET /api/v1/me/verdict (spec #171, D2c) through the Worker's public surface: the typed client for the routes that already exist, the real entrypoint and real
 // local D1 under it. The shelf verdict is built the way it is in life: the route queues a `build-verdict` message, the queue handler runs it, and only the
@@ -47,6 +47,9 @@ import { applied, code, ruleRow, taperRow, word } from './admin.catalog.support'
 //     tapers: { code, kind, schedule: { fromWeek, toWeek, frequency }[], whatToExpect, seeAProfessionalIf }[] }
 // `kind` and `product` (a `product` entry) or `noLabel` (a `no-label` one) are the shelf entry's own, exactly as GET /me/shelf and GET /me/shelf/{entryId} show it, so the
 // verdict reads without a second call. They are joined when the verdict is read; the saved verdict and its fingerprint do not hold them.
+// #259 A3 adds, to each product, `basis: Basis[]` (kind 'rule' | 'fit' | 'told-us' | 'no-label', each with a fixed `line`), and to the verdict `professional:
+// { whoToSee, howSoon, whatToTellThem } | null`; neither is on the guest's preview. A reviewer role of null and a professional of null cannot be reached here: the
+// import refuses an approved rule or claim word with no reviewer_role and a workbook with no approved about-a-product row, so those two are pinned in the service tests.
 // Left out on purpose: `facts` (the rules' own working, with ingredient and rule names: the reason is what the user reads), `step` and `sourceUrls` (the routine's
 // inputs, said so by their own type), and a template's status and audit columns (an internal workflow).
 
@@ -123,9 +126,11 @@ type PublicProduct = {
   sameJobAs?: string
   nudge?: string
   suggest: string[]
+  basis: Record<string, unknown>[]
 }
 type PublicTaper = { code: string; kind: string; schedule: { fromWeek: number; toWeek: number; frequency: string }[]; whatToExpect: string; seeAProfessionalIf: string }
-type ReadyView = { status: 'ready'; locked: false; fit: 'ready' | 'not-ready'; groups: GroupEntry[]; products: PublicProduct[]; tapers: PublicTaper[] }
+type PublicProfessional = { whoToSee: string; howSoon: string; whatToTellThem: string }
+type ReadyView = { status: 'ready'; locked: false; fit: 'ready' | 'not-ready'; groups: GroupEntry[]; products: PublicProduct[]; tapers: PublicTaper[]; professional: PublicProfessional | null }
 type Groups = { helping: number; redundant: number; blocking: number; conflicting: number; 'likely-the-problem': number; 'cant-tell': number; prescribed: number; undecided: number }
 type LockedView = { status: 'ready'; locked: true; fit: 'ready' | 'not-ready'; groups: GroupEntry[]; total: number; counts: Groups; escalates: number }
 type VerdictBody = { status: 'pending' } | ReadyView | LockedView
@@ -134,6 +139,11 @@ const NO_GROUPS: Groups = { helping: 0, redundant: 0, blocking: 0, conflicting: 
 // compare a whole body say only that they are there; what they hold is pinned by the tests of their own further down and by verdicts.view.test.ts.
 const GROUP_ORDER = ['likely-the-problem', 'conflicting', 'cant-tell', 'blocking', 'redundant', 'helping', 'prescribed', 'undecided'] as const
 const SUGGEST = { suggest: expect.any(Array) }
+// #259 A3: every product of the full verdict also carries `basis` (where its verdict came from) and the verdict carries `professional`; the tests that compare a whole
+// body say only that they are there, and the A3 tests at the end of the file pin what they hold.
+const BASIS = { basis: expect.any(Array) }
+// The about-a-product row is imported by every upload of this file (the contract needs it), so the verdict has it; its words are pinned by the A3 tests at the end.
+const PROFESSIONAL = { professional: expect.objectContaining({ whoToSee: expect.any(String), howSoon: expect.any(String), whatToTellThem: expect.any(String) }) }
 const GROUPS = { groups: expect.any(Array) }
 type GroupEntry = { group: string; title: string; subtitle: string; intro: string; count: number }
 const gateTrips = (text: string) => FORBIDDEN_WORDING.filter(({ pattern }) => pattern.test(text)).map(({ code: reason }) => reason)
@@ -440,7 +450,8 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
       locked: false,
       fit: 'ready',
       ...GROUPS,
-      products: [{ entryId, ...shows(entryId), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST }],
+      ...PROFESSIONAL,
+      products: [{ entryId, ...shows(entryId), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST, ...BASIS }],
       tapers: [],
     })
     expect(await dataOf(await getVerdict(guest))).toEqual(view)
@@ -462,20 +473,20 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
     await buildQueued(guest, { [twin]: { label: 'redundant', sameJobAs: helping } })
 
     const view = await dataOf<ReadyView>(await getVerdict(guest))
-    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'professional', 'status', 'tapers'])
     expect(view).toMatchObject({ status: 'ready', locked: false, fit: 'ready' })
     const byId = new Map(view.products.map((product) => [product.entryId, product]))
     expect([...byId.keys()].sort()).toEqual([steroid, mercury, helping, twin, unlabelled].sort())
 
     // A steroid stops with its kind's step-down, named by the template's code, with no escalation.
-    expect(byId.get(steroid)).toEqual({ entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false, ...SUGGEST })
+    expect(byId.get(steroid)).toEqual({ entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false, ...SUGGEST, ...BASIS })
     // Mercury stops at once, with no step-down, and routes to a professional.
-    expect(byId.get(mercury)).toEqual({ entryId: mercury, ...shows(mercury), group: 'likely-the-problem', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: true, ...SUGGEST })
+    expect(byId.get(mercury)).toEqual({ entryId: mercury, ...shows(mercury), group: 'likely-the-problem', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: true, ...SUGGEST, ...BASIS })
     // The judge's words are the reason as given, and a redundant product names the product that stays and does its job.
-    expect(byId.get(helping)).toEqual({ entryId: helping, ...shows(helping), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST })
-    expect(byId.get(twin)).toEqual({ entryId: twin, ...shows(twin), group: 'redundant', verdict: { kind: 'drop' }, reason: 'Reason: redundant.', escalate: false, sameJobAs: helping, ...SUGGEST })
+    expect(byId.get(helping)).toEqual({ entryId: helping, ...shows(helping), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST, ...BASIS })
+    expect(byId.get(twin)).toEqual({ entryId: twin, ...shows(twin), group: 'redundant', verdict: { kind: 'drop' }, reason: 'Reason: redundant.', escalate: false, sameJobAs: helping, ...SUGGEST, ...BASIS })
     // A product nothing could be read from is set aside with the nudge to photograph the back label.
-    expect(byId.get(unlabelled)).toEqual({ entryId: unlabelled, ...shows(unlabelled), group: 'cant-tell', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: false, nudge: 'photograph-back-label', ...SUGGEST })
+    expect(byId.get(unlabelled)).toEqual({ entryId: unlabelled, ...shows(unlabelled), group: 'cant-tell', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: false, nudge: 'photograph-back-label', ...SUGGEST, ...BASIS })
     for (const product of view.products) expect(product.reason.length).toBeGreaterThan(0)
 
     // Only the template a stopped product uses comes with it (taperRow's schedule is '1-2: alternate-days; 3-4: weekly; 5: stop').
@@ -633,7 +644,7 @@ describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict pro
     expect(byId.get(unlabelled)).toMatchObject({ kind: 'no-label', noLabel: { purpose: 'moisturise', source: 'market-vendor', usedFor: '6-months-2-years', description: 'A tub from the market' } })
     expect(byId.get(unlabelled)).not.toHaveProperty('product')
     // The body has the same top-level shape as before: the product's fields sit on each product, not beside the verdict.
-    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'professional', 'status', 'tapers'])
   })
 
   it('still gives only the fields it names: the product adds none of how the rules reached a verdict', async () => {
@@ -646,7 +657,7 @@ describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict pro
 
     const [item] = (await dataOf<ReadyView>(await getVerdict(guest))).products
 
-    expect(Object.keys(item!).sort()).toEqual(['entryId', 'escalate', 'group', 'kind', 'product', 'reason', 'suggest', 'verdict'])
+    expect(Object.keys(item!).sort()).toEqual(['basis', 'entryId', 'escalate', 'group', 'kind', 'product', 'reason', 'suggest', 'verdict'])
   })
 
   it('reads the product when it is asked, with no new build: it is not what the verdict was built from', async () => {
@@ -674,6 +685,9 @@ const privateTo = (shelf: (entryId: string) => { product?: object; noLabel?: obj
     return shown ? [shown.brand ?? '', shown.name ?? ''] : []
   }),
   ...full.tapers.flatMap((taper) => [taper.code, taper.whatToExpect, taper.seeAProfessionalIf]),
+  // #259 A3: where each verdict came from (its fixed lines, the rule's words, its source link and reviewer role) and the professional to see are the member's too.
+  ...full.products.flatMap((product) => product.basis.flatMap((basis) => [String(basis.line), ...(typeof basis.sourceUrl === 'string' ? [basis.sourceUrl] : []), ...(typeof basis.reviewerRole === 'string' ? [basis.reviewerRole] : [])])),
+  ...(full.professional ? [full.professional.whoToSee, full.professional.howSoon, full.professional.whatToTellThem] : []),
   STEROID_INGREDIENT,
   'VerdictBrand',
   'A tub from the market',
@@ -819,9 +833,10 @@ describe('GET /api/v1/me/verdict: a guest who signs up', () => {
       locked: false,
       fit: 'ready',
       ...GROUPS,
+      ...PROFESSIONAL,
       products: [
-        { entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false, ...SUGGEST },
-        { entryId: serum, ...shows(serum), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST },
+        { entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false, ...SUGGEST, ...BASIS },
+        { entryId: serum, ...shows(serum), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST, ...BASIS },
       ],
       tapers: [expect.objectContaining({ code: STEROID_TAPER, kind: 'steroid' })],
     })
@@ -899,7 +914,8 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
       locked: false,
       fit: 'not-ready',
       ...GROUPS,
-      products: [{ entryId, ...shows(entryId), group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, ...SUGGEST }],
+      ...PROFESSIONAL,
+      products: [{ entryId, ...shows(entryId), group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, ...SUGGEST, ...BASIS }],
       tapers: [],
     })
   })
@@ -919,9 +935,9 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
     expect(view).toMatchObject({ status: 'ready', locked: false, fit: 'ready', tapers: [] })
     const byId = new Map(view.products.map((product) => [product.entryId, product]))
     // The judge named no pick, so the floor's tie-break reduces the add-on (the acid) before the treatment.
-    expect(byId.get(acid)).toEqual({ entryId: acid, ...shows(acid), group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, reason: expect.any(String), escalate: false, ...SUGGEST })
+    expect(byId.get(acid)).toEqual({ entryId: acid, ...shows(acid), group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, reason: expect.any(String), escalate: false, ...SUGGEST, ...BASIS })
     expect(byId.get(acid)!.reason.length).toBeGreaterThan(0)
-    expect(byId.get(retinoid)).toEqual({ entryId: retinoid, ...shows(retinoid), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST })
+    expect(byId.get(retinoid)).toEqual({ entryId: retinoid, ...shows(retinoid), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST, ...BASIS })
   })
 
   it('suggests the frequency, in plain words, for a product reduced to alternate days', async () => {
@@ -964,7 +980,8 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
       locked: false,
       fit: 'ready',
       ...GROUPS,
-      products: [{ entryId, ...shows(entryId), group: 'prescribed', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, ...SUGGEST }],
+      ...PROFESSIONAL,
+      products: [{ entryId, ...shows(entryId), group: 'prescribed', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, ...SUGGEST, ...BASIS }],
       tapers: [],
     })
   })
@@ -985,5 +1002,117 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
     expect(res.status).toBe(200)
     expect(await dataOf(res)).toEqual({ status: 'pending' })
     expect(queuedFor(guest)).toHaveLength(2)
+  })
+})
+
+// --- #259 A3: where a verdict comes from, and "Talk to a professional" ---
+
+const SOURCED_BANNED = `${word('zq')} muskum`
+const SOURCED_RULE_URL = 'https://example.org/rules/muskum'
+const SOURCED_ROLE = 'a toxicologist'
+const CLAIM_PHRASE = word('zqphrase')
+const CLAIM_URL = 'https://example.org/claims/phrase'
+const ABOUT_A_PRODUCT = { who_to_see: 'A pharmacist, or a doctor you trust.', how_soon: 'Within the week, or sooner if it gets worse.', what_to_tell_them: 'The product, how long you used it, and what changed on your skin.' }
+
+describe('GET /api/v1/me/verdict: where each verdict comes from, and the professional to see (#259 A3)', () => {
+  beforeAll(async () => {
+    await applied((workbook) => {
+      workbook.ingredients.rows.push(
+        ruleRow({ name: SOURCED_BANNED, kind: 'banned-substance', statement: 'Not allowed in cosmetics in many countries.', source_url: SOURCED_RULE_URL, reviewer_role: SOURCED_ROLE }),
+      )
+      workbook.claimWords.rows.push(claimWordRow({ phrase: CLAIM_PHRASE, source_url: CLAIM_URL, reviewer_role: 'a pharmacist' }))
+      // The row is changed in place when the workbook has it (an upload keeps a reason's row), and added when it does not.
+      const row = workbook.escalations.rows.find((candidate) => candidate.reason === 'about-a-product')
+      if (row) Object.assign(row, ABOUT_A_PRODUCT)
+      else workbook.escalations.rows.push(escalationRow({ reason: 'about-a-product', ...ABOUT_A_PRODUCT }))
+    })
+  })
+
+  /** A member whose shelf holds a steroid cream, a cream with a sourced banned ingredient, a cream named for a lightening claim, a serum and a tub with no label. */
+  const builtShelf = async (asGuest = false) => {
+    const guest = asGuest ? await newGuest() : await newMember()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    const steroid = await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
+    const sourced = await onShelf(guest, [...CLEAN, SOURCED_BANNED])
+    const claimed = await onShelf(guest, CLEAN, `${freshBrand()} ${CLAIM_PHRASE}`)
+    const serum = await onShelf(guest)
+    const unlabelled = await noLabelOnShelf(guest, 'moisturise')
+    await getVerdict(guest)
+    await buildQueued(guest)
+    return { guest, steroid, sourced, claimed, serum, unlabelled }
+  }
+  const basisOfEntry = (view: ReadyView, entryId: string) => view.products.find((product) => product.entryId === entryId)!.basis
+
+  it('gives each product the basis it was built with: the workbook\'s own rule, with its source link and reviewer role, the claim word, the fit, and the unknown contents', async () => {
+    const { guest, steroid, sourced, claimed, serum, unlabelled } = await builtShelf()
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    // ruleRow's defaults: no source link, and the role every rule here is approved with.
+    expect(basisOfEntry(view, steroid)).toEqual([
+      { kind: 'rule', source: 'ingredient-rule', statement: 'A topical steroid.', sourceUrl: null, reviewerRole: REVIEWER_ROLE, line: 'A topical steroid.' },
+    ])
+    expect(basisOfEntry(view, sourced)).toEqual([
+      { kind: 'rule', source: 'ingredient-rule', statement: 'Not allowed in cosmetics in many countries.', sourceUrl: SOURCED_RULE_URL, reviewerRole: SOURCED_ROLE, line: 'Not allowed in cosmetics in many countries.' },
+    ])
+    expect(basisOfEntry(view, claimed)).toEqual([
+      { kind: 'rule', source: 'claim-word', statement: expect.stringContaining(CLAIM_PHRASE), sourceUrl: CLAIM_URL, reviewerRole: 'a pharmacist', line: expect.stringContaining(CLAIM_PHRASE) },
+    ])
+    expect(basisOfEntry(view, serum)).toEqual([{ kind: 'fit', line: expect.any(String) }])
+    expect(basisOfEntry(view, unlabelled)).toEqual([{ kind: 'no-label', about: 'unknown-contents', line: expect.any(String) }])
+  })
+
+  it('reads the same basis on every ask, with no new build, and gives it no field the app is not meant to read', async () => {
+    const { guest } = await builtShelf()
+    const before = await dataOf<ReadyView>(await getVerdict(guest))
+    const queuedBefore = queuedFor(guest).length
+
+    const again = await dataOf<ReadyView>(await getVerdict(guest))
+
+    expect(again).toEqual(before)
+    expect(queuedFor(guest)).toHaveLength(queuedBefore)
+    for (const product of before.products) for (const basis of product.basis) expect(Object.keys(basis).sort(), JSON.stringify(basis)).toEqual(
+      { rule: ['kind', 'line', 'reviewerRole', 'source', 'sourceUrl', 'statement'], fit: ['kind', 'line'], 'told-us': ['about', 'kind', 'line'], 'no-label': ['about', 'kind', 'line'] }[basis.kind as 'rule' | 'fit' | 'told-us' | 'no-label'],
+    )
+  })
+
+  it('passes the wording gate on every fixed line of the verdict, and on the words of a claim word\'s statement around the phrase it names', async () => {
+    const { guest } = await builtShelf()
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    const lines = view.products.flatMap((product) => product.basis).filter((basis) => basis.source !== 'ingredient-rule')
+    expect(lines.length).toBeGreaterThanOrEqual(3)
+    for (const basis of lines) {
+      const text = String(basis.source === 'claim-word' ? String(basis.statement).replaceAll(CLAIM_PHRASE, '') : basis.line)
+      expect(gateTrips(text), `"${text}"`).toEqual([])
+    }
+  })
+
+  it('gives the full verdict the approved about-a-product row: who to see, how soon, and what to tell them', async () => {
+    const { guest } = await builtShelf()
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    expect(view.professional).toEqual({ whoToSee: ABOUT_A_PRODUCT.who_to_see, howSoon: ABOUT_A_PRODUCT.how_soon, whatToTellThem: ABOUT_A_PRODUCT.what_to_tell_them })
+  })
+
+  it('gives a guest neither the basis nor the professional: the preview is the counts and the groups, and no word of either appears in it', async () => {
+    const { guest } = await builtShelf(true)
+
+    const raw = await (await getVerdict(guest)).text()
+
+    const preview = (JSON.parse(raw) as { data: LockedView }).data
+    expect(preview.locked).toBe(true)
+    expect(Object.keys(preview).sort()).toEqual(['counts', 'escalates', 'fit', 'groups', 'locked', 'status', 'total'])
+    expect(raw).not.toMatch(/basis|professional|whoToSee|howSoon|whatToTellThem|reviewerRole|sourceUrl/)
+    // Once the guest has signed up, the same build shows both: the words the preview must not give away are the member's.
+    await guest.signUp()
+    const member = await dataOf<ReadyView>(await getVerdict(guest))
+    expect(member.professional).not.toBeNull()
+    const hidden = [ABOUT_A_PRODUCT.who_to_see, ABOUT_A_PRODUCT.how_soon, ABOUT_A_PRODUCT.what_to_tell_them, ...member.products.flatMap((product) => product.basis.map((basis) => String(basis.line))), SOURCED_RULE_URL, SOURCED_ROLE]
+    expect(hidden.length).toBeGreaterThan(8)
+    for (const text of hidden) expect(raw).not.toContain(text)
   })
 })

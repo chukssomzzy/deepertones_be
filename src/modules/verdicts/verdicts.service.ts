@@ -30,7 +30,7 @@ export type VerdictServiceDeps = {
   jobs: JobQueue
   /** Tells whoever follows a profile's verdict that it was built: the full verdict on `verdict:<profileId>`, the guest's preview on `verdict-preview:<profileId>`. */
   events: ScanEvents
-  workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor' | 'skinConcernsFor'>
+  workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor' | 'skinConcernsFor' | 'escalationFor'>
   catalog: Pick<ProductCatalogService, 'shelfFacts' | 'latestIngredients'>
   shelf: Pick<ShelfService, 'activeEntriesFor' | 'viewsFor'>
   scans: Pick<ScanService, 'noLabelFacts' | 'hasShelfWorkInFlight'>
@@ -302,7 +302,8 @@ export class VerdictService {
 
   private async fullViewOf(profileId: string, fit: 'ready' | 'not-ready', saved: readonly SavedVerdictProduct[]): Promise<VerdictView> {
     const products = await this.shown(profileId, saved)
-    return { status: 'ready', locked: false, fit, products, tapers: await this.tapersOf(products) }
+    // The professional is read now, never saved: a row imported after the build shows at once, and no build is made for it.
+    return { status: 'ready', locked: false, fit, products, tapers: await this.tapersOf(products), professional: await this.workbook.escalationFor('about-a-product') }
   }
 
   /**
