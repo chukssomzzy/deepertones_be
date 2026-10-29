@@ -172,7 +172,7 @@ beforeEach(() => {
   service = new ReminderSendsService({
     settings,
     sends,
-    checkIns: { missedStreak: (profileId: string, today: string) => missedStreak(profileId, today) },
+    checkIns: { missedStreak: (profileId: string, today: string) => missedStreak(profileId, today), checkedTimes: async () => [] },
     channel: { missedDaysChannelFor: async (profileId: string) => channels.get(profileId) ?? 'push' },
     routine: {
       reminderPlanFor: async (profileId: string) => {
@@ -181,6 +181,9 @@ beforeEach(() => {
       },
     },
     notifications,
+    // This file pins the pushes alone: the inbox rows and the pause check-in push are pinned in reminders.sends.service.inbox.test.ts.
+    inbox: { write: async () => ({ id: 'unused', created: true }) },
+    skinCare: { checkInsDue: async () => [] },
   })
 })
 

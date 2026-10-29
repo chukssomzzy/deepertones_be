@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { jobSpec } from '../../jobs/job'
 import { REJECTED_PHOTO_REASONS } from '../../providers/perfect-corp/perfect-corp.provider'
 
-export const NOTIFICATION_KINDS = ['scan-finished', 'scan-needs-you', 'new-sign-in', 'face-scan-ready', 'face-scan-needs-retake', 'face-check-in-due', 'routine-reminder', 'step-down-alert', 'missed-days-nudge'] as const
+export const NOTIFICATION_KINDS = ['scan-finished', 'scan-needs-you', 'new-sign-in', 'face-scan-ready', 'face-scan-needs-retake', 'face-check-in-due', 'routine-reminder', 'step-down-alert', 'missed-days-nudge', 'pause-check-in'] as const
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number]
 
 const scanFinishedBody = z.object({
@@ -68,6 +68,8 @@ const routineReminderBody = z.object({
   time: z.enum(['morning', 'evening']),
   /** The entry titles the phone shows. Unlike the other kinds' text it is carried, since only the send job that queues it knows which entries are due; it is never logged. */
   title: z.string().min(1).max(200),
+  /** The inbox row of the same reminder, when it could be written: the app posts it to the tap route to mark the row read. */
+  inboxId: z.string().optional(),
 })
 
 const stepDownAlertBody = z.object({
@@ -77,6 +79,8 @@ const stepDownAlertBody = z.object({
   day: z.string(),
   /** One per step-down whose step begins that day: the product's routine title and the step's fixed line. Carried like the routine reminder's title, since only the send job knows which are due; never logged. */
   changes: z.array(z.object({ title: z.string().min(1), line: z.string().min(1) })).min(1),
+  /** The inbox row of the same alert, when it could be written. */
+  inboxId: z.string().optional(),
 })
 
 const missedDaysNudgeBody = z.object({
@@ -84,6 +88,16 @@ const missedDaysNudgeBody = z.object({
   profileId: z.string(),
   /** The first day of the run of missed days, 'YYYY-MM-DD': what makes the nudge once per run. */
   since: z.string(),
+})
+
+const pauseCheckInBody = z.object({
+  kind: z.literal('pause-check-in'),
+  profileId: z.string(),
+  pauseId: z.string(),
+  /** The pause's check day, 'YYYY-MM-DD': what makes the push once per check day (an answer of about the same moves it, and that is a new push). */
+  checkDay: z.string(),
+  /** The inbox row of the same check-in (`check-in-due`), when it could be written. */
+  inboxId: z.string().optional(),
 })
 
 /**
@@ -103,7 +117,7 @@ const reminderProfileBody = z.object({
 export const sendPushSpec = jobSpec({
   name: 'send-push',
   queue: 'push-delivery',
-  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody, faceCheckInDueBody, routineReminderBody, stepDownAlertBody, missedDaysNudgeBody, reminderProfileBody]),
+  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody, faceCheckInDueBody, routineReminderBody, stepDownAlertBody, missedDaysNudgeBody, pauseCheckInBody, reminderProfileBody]),
   // One key per notification occurrence, so a repeated message sends nothing. A person scanning ten products gets one
   // needs-you push per scan and need; an item that asks again after an unreadable back photo is one more.
   key: (body) => {
@@ -128,6 +142,8 @@ export const sendPushSpec = jobSpec({
         return `step-down-alert:${body.profileId}:${body.day}`
       case 'missed-days-nudge':
         return `missed-days-nudge:${body.profileId}:${body.since}`
+      case 'pause-check-in':
+        return `pause-check-in:${body.profileId}:${body.pauseId}:${body.checkDay}`
       case 'reminder-profile':
         return `reminder-profile:${body.profileId}:${body.slot}`
     }

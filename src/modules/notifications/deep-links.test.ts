@@ -18,6 +18,8 @@ const PROVIDED_IDS: Record<(typeof NOTIFICATION_KINDS)[number], string[]> = {
   // Both open a screen of the routine itself, whatever the day: neither carries an id (the alert's day and the nudge's run are in the payload for the app, not in the path).
   'step-down-alert': [],
   'missed-days-nudge': [],
+  // The check-in after a pause is answered from Today on the routine screen, whatever the pause: no id in the path (the pause's id is in the payload for the app, not in the path).
+  'pause-check-in': [],
 }
 
 const templates = deepLinks as Record<string, string>
@@ -51,6 +53,7 @@ describe('the deep-link table (deep-links.json)', () => {
     expect(placeholdersOf(templates['routine-reminder']!)).toEqual([])
     expect(placeholdersOf(templates['step-down-alert']!)).toEqual([])
     expect(placeholdersOf(templates['missed-days-nudge']!)).toEqual([])
+    expect(placeholdersOf(templates['pause-check-in']!)).toEqual([])
   })
 
   it('writes the face scan paths exactly as the app routes them', () => {
@@ -92,6 +95,15 @@ describe('the step-down alert and missed-days nudge deep links', () => {
     expect(templates['missed-days-nudge']).toBe('/routine')
     expect(deepLinkFor('missed-days-nudge', {})).toBe('/routine')
     expect(deepLinkFor('missed-days-nudge', { scanId: 'scan-1' })).toBe('/routine')
+  })
+})
+
+// ASSUMED path (the brief says "give it a deep link"; the app's routes decide): the check-in after a pause is shown on Today until it is answered, so a tap opens the routine screen.
+describe('the pause check-in deep link', () => {
+  it('opens the routine, whatever ids it is given', () => {
+    expect(templates['pause-check-in']).toBe('/routine')
+    expect(deepLinkFor('pause-check-in', {})).toBe('/routine')
+    expect(deepLinkFor('pause-check-in', { scanId: 'scan-1' })).toBe('/routine')
   })
 })
 

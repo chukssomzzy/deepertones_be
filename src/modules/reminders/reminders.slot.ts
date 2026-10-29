@@ -3,6 +3,9 @@ import type { ReminderSettings } from './reminders.types'
 /** What decides when a profile is reminded: its two times ('HH:MM', local) and its zone (an IANA name, UTC while none is stored). */
 export type ReminderClock = Pick<ReminderSettings, 'morning' | 'evening' | 'timeZone'>
 
+/** The times a profile with no settings row, or with reminders off, is counted by (its inbox lines are written at these times, though it is sent no push). */
+export const DEFAULT_TIMES = { morning: '07:00', evening: '21:00' }
+
 export type DueReminder = { time: 'morning' | 'evening'; day: string }
 
 /** A wall-clock reading as 'YYYY-MM-DDTHH:MM', which sorts as text. */
@@ -37,6 +40,9 @@ export const dueReminders = (clock: ReminderClock, slot: Date, readings: SlotRea
 
 /** The calendar day before `day` ('YYYY-MM-DD'). */
 export const dayBefore = (day: string): string => new Date(Date.parse(`${day}T00:00:00.000Z`) - DAY_MS).toISOString().slice(0, 10)
+
+/** The calendar day after `day` ('YYYY-MM-DD'). */
+export const dayAfter = (day: string): string => new Date(Date.parse(`${day}T00:00:00.000Z`) + DAY_MS).toISOString().slice(0, 10)
 
 /**
  * The local day whose `time` ('HH:MM') was reached within the last 15 minutes, or null. The wall clock is compared on both ends of the window, so a time the clocks skip

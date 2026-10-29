@@ -28,8 +28,8 @@ describe('the send-push job', () => {
     expect(sendPushSpec.retry).toEqual({ baseSeconds: 5, factor: 3, capSeconds: 135 })
   })
 
-  it('names the nine notification kinds', () => {
-    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-check-in-due', 'face-scan-needs-retake', 'face-scan-ready', 'missed-days-nudge', 'new-sign-in', 'routine-reminder', 'scan-finished', 'scan-needs-you', 'step-down-alert'])
+  it('names the ten notification kinds', () => {
+    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-check-in-due', 'face-scan-needs-retake', 'face-scan-ready', 'missed-days-nudge', 'new-sign-in', 'pause-check-in', 'routine-reminder', 'scan-finished', 'scan-needs-you', 'step-down-alert'])
   })
 
   it.each([

@@ -501,6 +501,8 @@ export const buildContainer = (env: CloudflareBindings) => {
         checkIns: routineCheckIns(),
         channel: reminders(),
         notifications: notifications(),
+        inbox: inbox(),
+        skinCare: skinCare(),
       }),
   )
 

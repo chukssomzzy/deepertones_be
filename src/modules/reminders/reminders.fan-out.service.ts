@@ -1,6 +1,6 @@
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import { sendPushSpec } from '../notifications/notifications.job-specs'
-import { dueReminders, type ReminderClock, type SlotReadings } from './reminders.slot'
+import { DEFAULT_TIMES, dueReminders, type ReminderClock, type SlotReadings } from './reminders.slot'
 import type { StartedProfile } from './reminders.types'
 
 export type ReminderFanOutServiceDeps = {
@@ -8,9 +8,6 @@ export type ReminderFanOutServiceDeps = {
   profiles: { startedProfiles(): Promise<StartedProfile[]> }
   jobs: JobQueue
 }
-
-/** The times a profile with no settings row, or with reminders off, is counted by. */
-const DEFAULT_TIMES = { morning: '07:00', evening: '21:00' }
 
 /**
  * The 15-minute reminder cron's whole job (spec #233, PR 8a): lists the profiles with a Started routine and their reminder times in one statement, keeps those with a time due

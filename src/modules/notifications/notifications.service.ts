@@ -7,6 +7,7 @@ import type { RejectedPhotoReason } from '../../providers/perfect-corp/perfect-c
 import { type PushMessage, type PushSender, PushUnavailableError, isExpoPushToken } from '../../providers/push/push.provider'
 import type { RemindersService } from '../reminders/reminders.service'
 import { deepLinkFor } from './deep-links'
+import { pauseCheckInText, routineReminderText, stepDownAlertText } from './notifications.copy'
 import { type CheckPushReceiptsMessage, type PushNotificationMessage, checkPushReceiptsSpec, sendPushSpec } from './notifications.job-specs'
 import type { NotificationSettingsRepository, PushTokensRepository } from './notifications.repository'
 import type { NotificationSettings, NotificationSettingsPatch, PushToken } from './notifications.types'
@@ -165,7 +166,7 @@ export class NotificationsService {
    * route; `title` is the entry titles, already past the wording gate. It belongs to the profile, so the body names no account. A failed enqueue is logged (without
    * the title) and swallowed. Answers whether it was queued, so the send job counts only what went out.
    */
-  async routineReminder(input: { profileId: string; day: string; time: 'morning' | 'evening'; title: string }): Promise<boolean> {
+  async routineReminder(input: { profileId: string; day: string; time: 'morning' | 'evening'; title: string; inboxId?: string }): Promise<boolean> {
     return this.enqueue({ kind: 'routine-reminder', ...input })
   }
 
@@ -173,7 +174,7 @@ export class NotificationsService {
    * Queues the step-down alert for the profile: `day` is its local day and `changes` the step-downs whose step begins that day (each a routine title and the step's fixed
    * line), at least one. One alert a day however many it lists. A failed enqueue is logged (without the text) and swallowed. Answers whether it was queued.
    */
-  async stepDownAlert(input: { profileId: string; day: string; changes: { title: string; line: string }[] }): Promise<boolean> {
+  async stepDownAlert(input: { profileId: string; day: string; changes: { title: string; line: string }[]; inboxId?: string }): Promise<boolean> {
     return this.enqueue({ kind: 'step-down-alert', ...input })
   }
 
@@ -183,6 +184,14 @@ export class NotificationsService {
    */
   async missedDaysNudge(input: { profileId: string; since: string }): Promise<boolean> {
     return this.enqueue({ kind: 'missed-days-nudge', ...input })
+  }
+
+  /**
+   * Queues the push for a check-in after a pause that is due: `checkDay` is the pause's check day, which keys it, so a check-in is one push for each check day and a pause whose check day
+   * moves (an answer of about the same) is another. The words are the same for every pause. A failed enqueue is logged and swallowed. Answers whether it was queued.
+   */
+  async pauseCheckIn(input: { profileId: string; pauseId: string; checkDay: string; inboxId?: string }): Promise<boolean> {
+    return this.enqueue({ kind: 'pause-check-in', ...input })
   }
 
   /** Whether any phone is registered for the profile, whatever account row it sits under. The reminder job reads it before it claims a send. */
@@ -295,7 +304,7 @@ export class NotificationsService {
       return true
     } catch {
       // Ids and outcome only, and no error text: this line must carry nothing about the account or the phone.
-      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}), ...('faceScanId' in body ? { faceScanId: body.faceScanId } : {}), ...('dayOneScanId' in body ? { dayOneScanId: body.dayOneScanId } : {}), ...(body.kind === 'routine-reminder' || body.kind === 'step-down-alert' || body.kind === 'missed-days-nudge' ? { profileId: body.profileId } : {}) })
+      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}), ...('faceScanId' in body ? { faceScanId: body.faceScanId } : {}), ...('dayOneScanId' in body ? { dayOneScanId: body.dayOneScanId } : {}), ...(body.kind === 'routine-reminder' || body.kind === 'step-down-alert' || body.kind === 'missed-days-nudge' || body.kind === 'pause-check-in' ? { profileId: body.profileId } : {}) })
       return false
     }
   }
@@ -305,7 +314,7 @@ export class NotificationsService {
     if (body.kind === 'new-sign-in') return true
     // The profile's own reminder switches, read now: a push switched off since it was queued is dropped. The account's scan switches have no say. The alert and the nudge need reminders on
     // as well as their own switch; RemindersService answers both in the one read.
-    if (body.kind === 'routine-reminder') return (await this.reminders?.enabledFor(body.profileId)) ?? false
+    if (body.kind === 'routine-reminder' || body.kind === 'pause-check-in') return (await this.reminders?.enabledFor(body.profileId)) ?? false
     if (body.kind === 'step-down-alert') return (await this.reminders?.stepDownAlertsFor(body.profileId)) ?? false
     if (body.kind === 'missed-days-nudge') return (await this.reminders?.missedDaysNudgeFor(body.profileId)) ?? false
     const switches = NotificationsService.switchesOf(await this.settingsRepository.get(body.userId))
@@ -320,12 +329,12 @@ export class NotificationsService {
     }
   }
 
-  /** Scan and face scan notifications go to the phones on the scan's profile, narrowed to the account; a routine reminder, step-down alert and missed-days nudge go to every phone of the profile; the sign-in alert goes to every phone of the account. */
+  /** Scan and face scan notifications go to the phones on the scan's profile, narrowed to the account; a routine reminder, step-down alert, missed-days nudge and pause check-in go to every phone of the profile; the sign-in alert goes to every phone of the account. */
   private async phonesFor(body: PushNotificationMessage): Promise<PushToken[]> {
     // A row created at or after the sign-in belongs to the phone that signed in (it registers once it has a session), so it is not alerted.
     if (body.kind === 'new-sign-in') return (await this.pushTokens.forUser(body.userId)).filter((phone) => phone.createdAt.getTime() < body.at)
     // A reminder, alert or nudge belongs to the profile, whatever account row its phones sit under.
-    if (body.kind === 'routine-reminder' || body.kind === 'step-down-alert' || body.kind === 'missed-days-nudge') return this.pushTokens.forProfile(body.profileId)
+    if (body.kind === 'routine-reminder' || body.kind === 'step-down-alert' || body.kind === 'missed-days-nudge' || body.kind === 'pause-check-in') return this.pushTokens.forProfile(body.profileId)
     // The profile's phones, narrowed to the account the message names.
     return (await this.pushTokens.forProfile(body.profileId)).filter((phone) => phone.userId === body.userId)
   }
@@ -372,17 +381,21 @@ export class NotificationsService {
       case 'routine-reminder':
         // The title lists the entries; the body is fixed, per time of day. `categoryId` is what makes the phone show the "Done" action, which posts `day` and `time` to the check-in route.
         return {
-          title: body.title,
-          body: body.time === 'morning' ? 'Time for your morning routine' : 'Time for your evening routine',
+          ...routineReminderText(body.time, body.title),
           categoryId: 'routine-reminder',
-          data: { kind: body.kind, url: deepLinkFor(body.kind, {}), profileId: body.profileId, day: body.day, time: body.time },
+          data: { kind: body.kind, url: deepLinkFor(body.kind, {}), profileId: body.profileId, day: body.day, time: body.time, ...NotificationsService.inboxIdOf(body) },
         }
       case 'step-down-alert':
         // Fixed copy around the routine's own words: each change is its product's plain routine title and the step's fixed line, both past the wording gate. No "Done" action: there is nothing to tick.
         return {
-          title: 'A change in your routine today',
-          body: body.changes.map(({ title, line }) => `${title}. ${line}`).join('\n'),
-          data: { kind: body.kind, url: deepLinkFor(body.kind, {}), profileId: body.profileId, day: body.day },
+          ...stepDownAlertText(body.changes),
+          data: { kind: body.kind, url: deepLinkFor(body.kind, {}), profileId: body.profileId, day: body.day, ...NotificationsService.inboxIdOf(body) },
+        }
+      case 'pause-check-in':
+        // Generic: the lock screen never names the step. The pause's id is for the app, which opens the check-in from Today.
+        return {
+          ...pauseCheckInText(),
+          data: { kind: body.kind, url: deepLinkFor(body.kind, {}), profileId: body.profileId, pauseId: body.pauseId, ...NotificationsService.inboxIdOf(body) },
         }
       case 'missed-days-nudge':
         // Kind and about nothing the person did: the same words for every run, with no date and no count.
@@ -400,6 +413,11 @@ export class NotificationsService {
         }
       }
     }
+  }
+
+  /** The inbox row this push is the delivery of, left out of `data` when the row could not be written. The app posts it to the tap route. */
+  private static inboxIdOf({ inboxId }: { inboxId?: string }): { inboxId?: string } {
+    return inboxId === undefined ? {} : { inboxId }
   }
 
   /** A temporary outage passes through as it is, so the job retries; anything else is our own setup and fails the job for good. */

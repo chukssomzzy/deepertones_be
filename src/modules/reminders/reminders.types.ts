@@ -23,3 +23,6 @@ export type StepDownChange = { day: string; title: string; line: string }
  * `RoutineViewerService.reminderPlanFor` answers it, and the container hands that over.
  */
 export type ReminderRoutinePlan = { dayOne: string; morning: PlanEntry[]; evening: PlanEntry[]; stepDownChanges: StepDownChange[] }
+
+/** A check-in after a pause that is due, as the send job needs it (SkinCareService.checkInsDue answers more; reminders may not import skin care, so this is the narrow type): the pause's id and its check day. */
+export type DueCheckIn = { id: string; checkDay: string }

@@ -7,5 +7,6 @@
   "face-check-in-due": "/scans/faces/new",
   "routine-reminder": "/routine",
   "step-down-alert": "/routine/step-down",
-  "missed-days-nudge": "/routine"
+  "missed-days-nudge": "/routine",
+  "pause-check-in": "/routine"
 }

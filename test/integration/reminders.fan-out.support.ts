@@ -179,7 +179,7 @@ export const queueOf = (binding: string): string => queueNames(binding.replace(/
 
 // --- the push messages ---
 
-const PUSH_KINDS = ['routine-reminder', 'step-down-alert', 'missed-days-nudge']
+const PUSH_KINDS = ['routine-reminder', 'step-down-alert', 'missed-days-nudge', 'pause-check-in']
 
 /** The body of a message, whether it was written bare or inside a `{ job, body }` envelope (a shared queue's). */
 const unwrapped = (message: unknown): Record<string, unknown> => {
@@ -196,6 +196,9 @@ export const pushesIn = (sent: Sent[]): Pushed[] =>
     .map(({ body }) => unwrapped(body))
     .filter((body) => PUSH_KINDS.includes(body.kind as string))
     .map(({ kind, profileId, day, time, since, title }) => ({ kind, profileId, day, time, since, title }) as Pushed)
+
+/** The push messages among what was sent, as they were queued (to be delivered to the queue they went to); the profile messages the cron fans out are not among them. */
+export const pushMessagesIn = (sent: Sent[]): Sent[] => sent.filter(({ body }) => PUSH_KINDS.includes(unwrapped(body).kind as string))
 
 /** What was sent that is not a push: the profile messages the cron fans out. */
 export const fanOutIn = (sent: Sent[]): Sent[] => sent.filter(({ body }) => !PUSH_KINDS.includes(unwrapped(body).kind as string))
