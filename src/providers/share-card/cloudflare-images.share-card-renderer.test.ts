@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { CloudflareImagesShareCardRenderer } from './cloudflare-images.share-card-renderer'
 import { type ShareCardLayout, ShareCardQuotaError } from './share-card.provider'
 
-// The real renderer over a recording stand-in for the Images binding (the binding is not available locally; the real one is checked once on staging). What is pinned here is
+// The real renderer over a recording stand-in for the Images binding (the binding is not available locally; the real one was checked against Cloudflare once, 2026-10-30). What is pinned here is
 // what the card asks of the binding: one PNG output, photos that are only resized, and the quota refusal told apart from any other failure.
 
 // A small layout of its own: this file is about what the renderer asks of the binding, not about where the layout puts things (face-shares.layout.test.ts).
@@ -21,6 +21,9 @@ const LAYOUT: ShareCardLayout = {
 
 type Call = { method: string; args: unknown[] }
 
+/** Read off a recorded handle: whether it began as an image (`input`) or as text (`text`), so a test can tell what was drawn. */
+const KIND = Symbol('kind')
+
 const CARD = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])
 const PHOTO = (marker: number) => ({ bytes: new Uint8Array([0xff, 0xd8, marker]), mediaType: 'image/jpeg' as const })
 const LOGO = { bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9]), mediaType: 'image/png' as const }
@@ -28,12 +31,13 @@ const LOGO = { bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9]), mediaType: 'i
 const recordingImages = (options: { outputFails?: unknown } = {}) => {
   const calls: Call[] = []
   const inputs: Uint8Array[] = []
-  const handle = (): unknown =>
+  const handle = (kind: 'image' | 'text'): unknown =>
     new Proxy(
       {},
       {
-        get: (_target, method: string) => {
-          if (method === 'then') return undefined
+        get: (_target, method: string | symbol) => {
+          if (method === KIND) return kind
+          if (typeof method === 'symbol' || method === 'then') return undefined
           if (method === 'output') {
             return async (...args: unknown[]) => {
               calls.push({ method, args })
@@ -43,7 +47,7 @@ const recordingImages = (options: { outputFails?: unknown } = {}) => {
           }
           return (...args: unknown[]) => {
             calls.push({ method, args })
-            return handle()
+            return handle(kind)
           }
         },
       },
@@ -52,11 +56,11 @@ const recordingImages = (options: { outputFails?: unknown } = {}) => {
     input: (stream: ReadableStream<Uint8Array>) => {
       calls.push({ method: 'input', args: [stream] })
       void new Response(stream).arrayBuffer().then((buffer) => inputs.push(new Uint8Array(buffer)))
-      return handle()
+      return handle('image')
     },
     text: (...args: unknown[]) => {
       calls.push({ method: 'text', args })
-      return handle()
+      return handle('text')
     },
   } as unknown as ImagesBinding
   return { binding, calls, inputs }
@@ -95,6 +99,23 @@ describe('CloudflareImagesShareCardRenderer', () => {
     const texts = calls.filter((call) => call.method === 'text')
     expect(texts.map((call) => call.args[0])).toEqual(['Day 1', 'Day 15'])
     for (const call of texts) expect(call.args[1]).toMatchObject({ font: { url: 'https://fonts.test/label.ttf' } })
+  })
+
+  // Found on the real binding (2026-10-30, wrangler dev --remote): it draws every image overlay before any text overlay but keeps the positions in the order given, so a text drawn before an
+  // image took that image's place (the logo landed on the "Day 1" band). Drawing the images first keeps each overlay at its own position.
+  it('draws every image (the photos, then the logo) before any text, each at its own position', async () => {
+    const { binding, calls } = recordingImages()
+
+    await render(binding)
+
+    const draws = calls.filter((call) => call.method === 'draw').map((call) => ({ kind: (call.args[0] as Record<symbol, string>)[KIND], at: call.args[1] }))
+    expect(draws).toEqual([
+      { kind: 'image', at: { top: 100, left: 100 } },
+      { kind: 'image', at: { top: 700, left: 100 } },
+      { kind: 'image', at: { top: 1850, left: 800 } },
+      { kind: 'text', at: { top: 40, left: 100 } },
+      { kind: 'text', at: { top: 640, left: 100 } },
+    ])
   })
 
   it('tells the free allowance running out (error 9422) apart: ShareCardQuotaError', async () => {
