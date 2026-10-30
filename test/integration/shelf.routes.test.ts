@@ -13,7 +13,9 @@ import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.servic
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { markedJpeg } from '../../src/modules/scans/scans.photos.fake'
 import { scans } from '../../src/modules/scans/scans.table'
+import { opsAlertClaims } from '../../src/modules/ops-alerts/ops-alerts.table'
 import { profileProducts } from '../../src/modules/shelf/shelf.table'
+import { verdictReports } from '../../src/modules/verdicts/verdicts.table'
 import { messageResponse, searchCall, searchResults, stubFetch, textBlock } from '../../src/providers/anthropic/messages-api.fake'
 import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memory.catalog-image-store'
 import { MemoryEmailSender } from '../../src/providers/email/memory.email'
@@ -1041,5 +1043,348 @@ describe('POST /api/v1/me/shelf', () => {
       expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
       expect(retryAfterOf(limited!)).toBeGreaterThan(0)
     }, RATE_TEST_TIMEOUT_MS)
+  })
+})
+
+// --- "This isn't the right product": POST /api/v1/me/shelf/{entryId}/replace { productId } (spec #259, B3) ---
+//
+// The entry is taken off the shelf with the removed reason `wrong-product`, a wrong-match report is stored (verdict_reports: kind wrong-match, the entry, the old and the new
+// product), the `wrong-match-report` ops alert is raised, and the right product is added by exactly the path POST /me/shelf takes: 200 with the existing entry when it is already
+// on the shelf, 202 { scanId, itemId } for a typed scan, the same daily limit. The checks come first and in this order: 401, 404 SHELF_ENTRY_NOT_FOUND (unknown, another profile's,
+// already removed), 400 VALIDATION_FAILED (the product is the entry's own, or the body is wrong), 404 PRODUCT_NOT_FOUND, and none of them removes anything. An add that fails
+// after the removal (429) leaves the removal and the report. Guests may swap, as they may add. The route has no call on the typed client until it exists, so plain fetch is used.
+// There is no route that reads a report or a removed reason, so both are read from their tables, as the DELETE tests read the reason.
+
+const replaceUrl = (entryId: string) => `http://deepertones.test/api/v1/me/shelf/${entryId}/replace`
+const replaceEntry = (guest: Guest | undefined, entryId: string, body: unknown) =>
+  fetchWorker(replaceUrl(entryId), {
+    method: 'POST',
+    headers: { ...(guest ? guest.headers() : { 'cf-connecting-ip': freshIp() }), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+const reportsOf = async (guest: Guest) => db.select().from(verdictReports).where(eq(verdictReports.profileId, await profileIdOf(guest)))
+const rowOf = async (entryId: string) => (await db.select().from(profileProducts).where(eq(profileProducts.id, entryId)))[0]!
+/** A guest with one product on the shelf, put there by a scan, and the id the catalog knows it by. */
+const guestWithWrongProduct = async () => {
+  const guest = await newGuest()
+  const wrong = await cataloguedProduct()
+  await scanProduct(guest, wrong.productId)
+  const [entry] = await entriesOf(guest)
+  return { guest, entry: entry!, wrongProductId: wrong.productId }
+}
+
+describe('POST /api/v1/me/shelf/{entryId}/replace', () => {
+  // A wiring smoke test: that the container hands the shelf service the real ops alerts. The unit tier pins what is raised, and the once-per-window dedupe. The claim is cleared first so
+  // that it can only be held again by this swap.
+  it('raises the wrong-match-report alert for a swap: its claim for today\'s window is held afterwards', async () => {
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const windowStart = Math.floor(Date.now() / DAY_MS) * DAY_MS
+    const { guest, entry } = await guestWithWrongProduct()
+    const right = await cataloguedProduct()
+    await db.delete(opsAlertClaims).where(eq(opsAlertClaims.kind, 'wrong-match-report'))
+
+    expect((await replaceEntry(guest, entry.id, { productId: right.productId })).status).toBe(202)
+
+    const [claim] = await db.select().from(opsAlertClaims).where(eq(opsAlertClaims.kind, 'wrong-match-report'))
+    expect(claim!.windowStart.getTime()).toBeGreaterThanOrEqual(windowStart)
+  })
+
+  describe('a right product that is already on the shelf', () => {
+    it('answers 200 with that entry, as the shelf shows it, takes the wrong one off as wrong-product, stores one wrong-match report and makes no scan', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+      const right = await cataloguedProduct()
+      await scanProduct(guest, right.productId)
+      const rightEntry = (await entriesOf(guest)).find((e) => e.product!.id === right.productId)!
+      const scansBefore = await scanCountOf(guest)
+      queued.length = 0
+      pushQueued.length = 0
+
+      const res = await replaceEntry(guest, wrong.id, { productId: right.productId })
+
+      expect(res.status).toBe(200)
+      expect(await dataOf<EntryBody>(res)).toEqual(rightEntry)
+      expect(await entriesOf(guest)).toEqual([rightEntry])
+      const wrongRow = await rowOf(wrong.id)
+      expect(wrongRow).toMatchObject({ removedReason: 'wrong-product' })
+      expect(wrongRow.removedAt).toBeInstanceOf(Date)
+      expect(await rowOf(rightEntry.id)).toMatchObject({ removedAt: null, removedReason: null })
+      expect(await reportsOf(guest)).toEqual([
+        expect.objectContaining({ kind: 'wrong-match', profileId: await profileIdOf(guest), entryId: wrong.id, oldProductId: wrong.product!.id, newProductId: right.productId, note: null }),
+      ])
+      expect(await scanCountOf(guest)).toBe(scansBefore)
+      expect(queued).toEqual([])
+      expect(pushQueued).toEqual([])
+    })
+
+    it('answers 200 even when the daily allowance is used up, as POST /me/shelf does, and the removal and report stand', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+      const right = await cataloguedProduct()
+      await scanProduct(guest, right.productId)
+      // Two scans of 3 photos each: 24 more is the day's 30.
+      await takePhotos(guest, 24)
+      expect((await photoResponse(guest)).status).toBe(429)
+
+      expect((await replaceEntry(guest, wrong.id, { productId: right.productId })).status).toBe(200)
+
+      expect(await rowOf(wrong.id)).toMatchObject({ removedReason: 'wrong-product' })
+      expect(await reportsOf(guest)).toHaveLength(1)
+    })
+  })
+
+  describe('a right product the catalog has analysed', () => {
+    it('answers 202 with the typed scan, puts the right product on the shelf at once in its place, takes the wrong one off as wrong-product and stores the report', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+      const right = await cataloguedProduct()
+      queued.length = 0
+
+      const res = await replaceEntry(guest, wrong.id, { productId: right.productId })
+
+      const { scanId, itemId } = await started(res)
+      expect((await scanOf(guest, scanId))).toMatchObject({ kind: 'typed', photos: [] })
+      const entries = await entriesOf(guest)
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatchObject({ kind: 'product', source: { scanId, itemId }, product: { id: right.productId } })
+      expect(entries[0]!.id).not.toBe(wrong.id)
+      expect(await rowOf(wrong.id)).toMatchObject({ removedReason: 'wrong-product' })
+      expect(await reportsOf(guest)).toEqual([
+        expect.objectContaining({ kind: 'wrong-match', entryId: wrong.id, oldProductId: wrong.product!.id, newProductId: right.productId }),
+      ])
+      expect(queued).toEqual([])
+    })
+
+    it('uses none of the day\'s photos', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+      const right = await cataloguedProduct()
+      await started(await replaceEntry(guest, wrong.id, { productId: right.productId }))
+
+      // The first scan took 3 photos: 27 more is the day's 30, and the swap has not taken one.
+      await takePhotos(guest, 27)
+
+      expect((await photoResponse(guest)).status).toBe(429)
+    })
+
+    it('lets a guest swap: the session needs no account', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+      const right = await cataloguedProduct()
+
+      expect((await replaceEntry(guest, wrong.id, { productId: right.productId })).status).toBe(202)
+    })
+  })
+
+  describe('a right product that needs research or analysis', () => {
+    it('answers 202 with the item researching and the research queued, takes the wrong one off, counts as one of the day\'s photos and is on the shelf only when the item is ready', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+      const productId = await productNeedingResearch()
+      // The first scan took 3 photos: 26 more is 29, and the swap is the 30th.
+      await takePhotos(guest, 26)
+      queued.length = 0
+
+      const { scanId, itemId } = await started(await replaceEntry(guest, wrong.id, { productId }))
+
+      expect((await scanOf(guest, scanId)).items[0]).toMatchObject({ id: itemId, state: 'researching' })
+      expect(queued).toEqual([{ itemId, step: 'research', at: expect.any(Number) }])
+      expect(await entriesOf(guest)).toEqual([])
+      expect(await rowOf(wrong.id)).toMatchObject({ removedReason: 'wrong-product' })
+      expect(await reportsOf(guest)).toHaveLength(1)
+      const refused = await photoResponse(guest)
+      expect(refused.status).toBe(429)
+      expect(await errorCodeOf(refused)).toBe('SCAN_DAILY_LIMIT')
+    })
+
+    it('puts the right product on the shelf once the analysis has run', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+      const productId = await productNeedingAnalysis()
+      const { scanId, itemId } = await started(await replaceEntry(guest, wrong.id, { productId }))
+
+      stubAnthropic(analysedWithNoConcerns)
+      await runStep(itemId, 'analyse')
+      vi.unstubAllGlobals()
+
+      expect((await entriesOf(guest)).map((e) => ({ source: e.source, productId: e.product!.id }))).toEqual([{ source: { scanId, itemId }, productId }])
+    })
+  })
+
+  describe('the daily limit', () => {
+    it('answers 429 SCAN_DAILY_LIMIT with Retry-After after 30 photos, and the removal and the report stand: the wrong product stays off the shelf', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+      const productId = await productNeedingAnalysis()
+      await takePhotos(guest, 27)
+      const scansBefore = await scanCountOf(guest)
+      queued.length = 0
+
+      const res = await replaceEntry(guest, wrong.id, { productId })
+
+      expect(res.status).toBe(429)
+      expect(await errorCodeOf(res)).toBe('SCAN_DAILY_LIMIT')
+      expect(retryAfterOf(res)).toBeGreaterThan(0)
+      expect(retryAfterOf(res)).toBeLessThanOrEqual(DAY_SECONDS + 1)
+      expect(await rowOf(wrong.id)).toMatchObject({ removedReason: 'wrong-product' })
+      expect(await entriesOf(guest)).toEqual([])
+      expect(await reportsOf(guest)).toEqual([expect.objectContaining({ kind: 'wrong-match', entryId: wrong.id, newProductId: productId })])
+      expect(await scanCountOf(guest)).toBe(scansBefore)
+      expect(queued).toEqual([])
+    })
+  })
+
+  describe('a right product the catalog does not offer', () => {
+    it('answers 404 PRODUCT_NOT_FOUND for an id the catalog does not hold, with nothing removed, no report and no scan', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+      const scansBefore = await scanCountOf(guest)
+
+      const res = await replaceEntry(guest, wrong.id, { productId: crypto.randomUUID() })
+
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('PRODUCT_NOT_FOUND')
+      expect(await entriesOf(guest)).toEqual([wrong])
+      expect(await rowOf(wrong.id)).toMatchObject({ removedAt: null, removedReason: null })
+      expect(await reportsOf(guest)).toEqual([])
+      expect(await scanCountOf(guest)).toBe(scansBefore)
+    })
+
+    it('answers 404 PRODUCT_NOT_FOUND for an unnamed product, with nothing removed and no report', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+
+      const res = await replaceEntry(guest, wrong.id, { productId: await unnamedProduct() })
+
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('PRODUCT_NOT_FOUND')
+      expect(await entriesOf(guest)).toEqual([wrong])
+      expect(await reportsOf(guest)).toEqual([])
+    })
+
+    it('answers 404 rather than 429 when the allowance is used up, and still removes nothing: the product is looked at first', async () => {
+      const { guest, entry: wrong } = await guestWithWrongProduct()
+      await takePhotos(guest, 27)
+
+      const res = await replaceEntry(guest, wrong.id, { productId: crypto.randomUUID() })
+
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('PRODUCT_NOT_FOUND')
+      expect(await entriesOf(guest)).toEqual([wrong])
+      expect(await reportsOf(guest)).toEqual([])
+    })
+  })
+
+  describe('the entry', () => {
+    it('answers 400 VALIDATION_FAILED when the product is the entry\'s own: it is not a swap, so nothing is removed or reported', async () => {
+      const { guest, entry, wrongProductId } = await guestWithWrongProduct()
+
+      const res = await replaceEntry(guest, entry.id, { productId: wrongProductId })
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+      expect(await entriesOf(guest)).toEqual([entry])
+      expect(await reportsOf(guest)).toEqual([])
+    })
+
+    it('answers 404 SHELF_ENTRY_NOT_FOUND for another profile\'s entry as for one that does not exist, and it stays on its owner\'s shelf with no report', async () => {
+      const { guest: owner, entry } = await guestWithWrongProduct()
+      const intruder = await newGuest()
+      const right = await cataloguedProduct()
+
+      const res = await replaceEntry(intruder, entry.id, { productId: right.productId })
+
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('SHELF_ENTRY_NOT_FOUND')
+      expect(await entriesOf(owner)).toEqual([entry])
+      expect(await reportsOf(owner)).toEqual([])
+      expect(await reportsOf(intruder)).toEqual([])
+      expect(await entriesOf(intruder)).toEqual([])
+    })
+
+    it('answers 404 SHELF_ENTRY_NOT_FOUND for an id nobody has, even when the product is unknown too: the entry is looked at first', async () => {
+      const guest = await newGuest()
+
+      const res = await replaceEntry(guest, crypto.randomUUID(), { productId: crypto.randomUUID() })
+
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('SHELF_ENTRY_NOT_FOUND')
+      expect(await reportsOf(guest)).toEqual([])
+    })
+
+    it('answers 404 SHELF_ENTRY_NOT_FOUND for an entry already removed, though removing it again is 204, and keeps its first reason and writes no report', async () => {
+      const { guest, entry } = await guestWithWrongProduct()
+      expect((await deleteEntry(guest, entry.id, { reason: 'finished' })).status).toBe(204)
+      const right = await cataloguedProduct()
+
+      const res = await replaceEntry(guest, entry.id, { productId: right.productId })
+
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('SHELF_ENTRY_NOT_FOUND')
+      expect(await rowOf(entry.id)).toMatchObject({ removedReason: 'finished' })
+      expect(await entriesOf(guest)).toEqual([])
+      expect(await reportsOf(guest)).toEqual([])
+    })
+
+    it('answers 400 VALIDATION_FAILED for an entry id that is not a UUID', async () => {
+      const guest = await newGuest()
+
+      const res = await replaceEntry(guest, 'not-an-entry', { productId: crypto.randomUUID() })
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+    })
+  })
+
+  describe('the body', () => {
+    it.each([['no productId', {}], ['an empty productId', { productId: '' }], ['a productId that is not text', { productId: 5 }], ['an extra key', { productId: 'x', extra: 1 }], ['a null body', null]])(
+      'answers 400 VALIDATION_FAILED for %s, and removes nothing',
+      async (_label, body) => {
+        const { guest, entry } = await guestWithWrongProduct()
+
+        const res = await replaceEntry(guest, entry.id, body)
+
+        expect(res.status).toBe(400)
+        expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+        expect(await entriesOf(guest)).toEqual([entry])
+        expect(await reportsOf(guest)).toEqual([])
+      },
+    )
+
+    it('answers 400 VALIDATION_FAILED for a body that is not JSON, and removes nothing', async () => {
+      const { guest, entry } = await guestWithWrongProduct()
+
+      const res = await fetchWorker(replaceUrl(entry.id), { method: 'POST', headers: { ...guest.headers(), 'content-type': 'application/json' }, body: '{not json' })
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+      expect(await entriesOf(guest)).toEqual([entry])
+    })
+  })
+
+  it('answers 401 AUTH_REQUIRED without a token', async () => {
+    const res = await replaceEntry(undefined, crypto.randomUUID(), { productId: crypto.randomUUID() })
+
+    expect(res.status).toBe(401)
+    expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+  })
+})
+
+// wrong-product is written by the swap alone: the public removals do not accept it.
+describe('the removed reason wrong-product on the public removals', () => {
+  it('is refused by DELETE /api/v1/me/shelf/{entryId} with 400 VALIDATION_FAILED, and the entry stays on the shelf', async () => {
+    const { guest, entry } = await guestWithWrongProduct()
+
+    const res = await deleteEntry(guest, entry.id, { reason: 'wrong-product' })
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+    expect(await entriesOf(guest)).toEqual([entry])
+    expect(await rowOf(entry.id)).toMatchObject({ removedAt: null, removedReason: null })
+  })
+
+  it('is refused by POST /api/v1/me/shelf/remove (bulk) with 400 VALIDATION_FAILED, and the entry stays on the shelf', async () => {
+    const { guest, entry } = await guestWithWrongProduct()
+
+    const res = await fetchWorker('http://deepertones.test/api/v1/me/shelf/remove', {
+      method: 'POST',
+      headers: { ...guest.headers(), 'content-type': 'application/json' },
+      body: JSON.stringify({ entryIds: [entry.id], reason: 'wrong-product' }),
+    })
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res as Reply)).toBe('VALIDATION_FAILED')
+    expect(await entriesOf(guest)).toEqual([entry])
+    expect(await rowOf(entry.id)).toMatchObject({ removedAt: null, removedReason: null })
   })
 })

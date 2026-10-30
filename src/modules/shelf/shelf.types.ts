@@ -4,3 +4,6 @@ import type { profileProducts } from './shelf.table'
 export type ShelfEntryRow = typeof profileProducts.$inferSelect
 
 export type ShelfRemovedReason = NonNullable<ShelfEntryRow['removedReason']>
+
+/** The reasons a person can give when removing: `wrong-product` is written by the swap alone, so it is not one of them. */
+export type ShelfPublicRemovedReason = Exclude<ShelfRemovedReason, 'wrong-product'>

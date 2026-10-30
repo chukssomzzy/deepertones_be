@@ -102,6 +102,8 @@ const setup = (options: SetupOptions = {}) => {
       },
     },
     opsAlerts: new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: new MemoryJobQueue(), email: new MemoryEmailSender(), recipient: '', environment: 'test', now: () => clock }),
+    // The zone is the share card's concern (face-scans.share-read.test.ts); nothing here reads it.
+    reminders: { zoneFor: async () => null },
     photoLinkSecret: PHOTO_SECRET,
     environment: 'test',
     now: () => clock,

@@ -296,6 +296,8 @@ describe('wrangler.jsonc scan, goal, safety, product search and shelf route rate
     ['PERFECT_CORP_WEBHOOK_LIMITER', 300],
     // The admin catalog routes (export and import), per address and before the token is checked, so a guess at the token costs an attempt. Only a few people ever call them.
     ['ADMIN_IP_LIMITER', 10],
+    // Each share card spends an Images transformation (5,000 a month free): as tight as the other routes that can cost something. Per user only; the route needs a session.
+    ['FACE_SHARE_USER_LIMITER', 10],
   ]
   const cases = scanLimitBlocks.flatMap(([place, block]) => limiters.map(([name, limit]) => ({ place, block, name, limit })))
 
