@@ -2170,14 +2170,11 @@ describe('FaceScanService.watch: the live stream', () => {
   })
 })
 
-describe('FaceScanService: a guest may run the scan flow, and the stream carries status only', () => {
-  // A guest (status 'anonymous') may give consent, start a scan, retake it and follow it live; a verified user may too. Whoever watches, every `face` frame
-  // and the snapshot is exactly { id, state, reason }: where the scan has got to and why, never the result, the scores, the skin type or age, the overlays,
-  // the photo links or the goal. The result is only for GET /scans/faces/{id}, which is for verified users.
-  const actors = [
-    ['a guest', 'anonymous'],
-    ['a verified user', 'verified'],
-  ] as const
+describe('FaceScanService: the scan flow needs a verified user, and the stream carries status only', () => {
+  // Every method a person calls (consent, create, retake, watch) needs a verified user: a face scan costs real money and a guest cannot see the result.
+  // For the verified user who does watch, every `face` frame and the snapshot is exactly { id, state, reason }: where the scan has got to and why, never
+  // the result, the scores, the skin type or age, the overlays, the photo links or the goal. The result is only for getFaceScan.
+  const actors = [['a verified user', 'verified']] as const
   const asStatus = (status: 'anonymous' | 'verified') => <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId: USER, status, profileId: PROFILE }, fn)
   const STATUS_KEYS = ['id', 'reason', 'state']
 
@@ -2265,20 +2262,65 @@ describe('FaceScanService: a guest may run the scan flow, and the stream carries
     })
   })
 
-  it('moves a guest\'s scan that needed a retake to analysing, replaces the front photo and queues the upload again', async () => {
+  it('refuses a guest the retake of a scan that needs one with 403 VERIFICATION_REQUIRED, and the retake costs nothing: the old photo stays, nothing is queued, Perfect Corp is not called again and nothing is spent', async () => {
     const ctx = setup()
     const guest = asStatus('anonymous')
-    const id = await startedBy(ctx, guest)
+    const id = await startedBy(ctx, asStatus('verified'))
+    ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('no-face'))
+    await upload(ctx, id)
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'needs-retake' })
+    clearQueue(ctx)
+    const callsBefore = methodsCalled(ctx).length
+    const spentBefore = ctx.aiUsage.recorded.length
+
+    const error = await errorOf(guest(() => ctx.service.retake(id, { front: face(9) })))
+
+    expect(error.code).toBe('VERIFICATION_REQUIRED')
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'needs-retake', reason: 'no-face' })
+    expect(Array.from(ctx.photos.stored.get(frontKey(ctx, id))!.bytes)).toEqual(Array.from(face(1).bytes))
+    expect(queuedSteps(ctx)).toEqual([])
+    expect(methodsCalled(ctx)).toHaveLength(callsBefore)
+    expect(ctx.aiUsage.recorded).toHaveLength(spentBefore)
+  })
+
+  it('moves a verified user\'s scan that needed a retake to analysing, replaces the front photo and queues the upload again', async () => {
+    const ctx = setup()
+    const run = asStatus('verified')
+    const id = await startedBy(ctx, run)
     ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('no-face'))
     await upload(ctx, id)
     clearQueue(ctx)
 
-    const view = await guest(() => ctx.service.retake(id, { front: face(9) }))
+    const view = await run(() => ctx.service.retake(id, { front: face(9) }))
 
     expect(view).toMatchObject({ id, state: 'analysing', reason: null })
     expect(await rowOf(ctx, id)).toMatchObject({ state: 'analysing', reason: null, pcAnalysisTaskId: null })
     expect(Array.from(ctx.photos.stored.get(frontKey(ctx, id))!.bytes)).toEqual(Array.from(face(9).bytes))
     expect(queuedSteps(ctx)).toEqual([{ faceScanId: id, step: 'upload', at: ctx.now().getTime() }])
+  })
+
+  it('refuses a guest the scan flow itself: giving consent, starting a scan and following one are all 403, and none of it costs anything', async () => {
+    const ctx = setup()
+    const guest = asStatus('anonymous')
+    const id = await startedBy(ctx, asStatus('verified'))
+    const storedBefore = [...ctx.photos.stored.keys()].sort()
+    clearQueue(ctx)
+    const callsBefore = methodsCalled(ctx).length
+
+    const calls: (() => Promise<unknown>)[] = [
+      () => ctx.service.giveConsent(CURRENT_FACE_CONSENT_VERSION),
+      () => ctx.service.create({ front: face(5) }),
+      () => ctx.service.watch(id),
+    ]
+    for (const call of calls) {
+      expect((await errorOf(guest(call))).code).toBe('VERIFICATION_REQUIRED')
+    }
+
+    expect([...ctx.photos.stored.keys()].sort()).toEqual(storedBefore)
+    expect(queuedSteps(ctx)).toEqual([])
+    expect(methodsCalled(ctx)).toHaveLength(callsBefore)
+    expect(ctx.aiUsage.recorded).toEqual([])
+    expect(ctx.events.subscribed).toEqual([])
   })
 
   it('refuses a guest the result with 403 VERIFICATION_REQUIRED, though its scan is ready', async () => {

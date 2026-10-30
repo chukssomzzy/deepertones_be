@@ -1,7 +1,6 @@
 import { bodyLimit } from 'hono/body-limit'
 import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
 import { rateLimit } from '../../middleware/rate-limit'
-import { signedIn } from '../../middleware/signed-in'
 import { verifiedUser } from '../../middleware/verified-user'
 import { toProductImage } from '../scans/scans.presenter'
 import { toFaceConsentGivenResponse, toFaceConsentResponse, toFaceScanResponse } from './face-scans.presenter'
@@ -21,10 +20,10 @@ import { FACE_SCAN_POLICY } from './face-scans.service'
 
 const bearer = [{ bearerAuth: [] }]
 
-// A guest may run the scan flow (give consent, start a scan, retake, follow it live: signedIn()); everything that shows or manages what the scan found is for
-// verified users (verifiedUser(), 403 VERIFICATION_REQUIRED for a guest). Both are early exits, before any body is parsed or validated, so every route answers the
-// same way; the service's requireUser / requireVerified still decide.
-const GUEST_OPEN = 'A guest may call this. '
+// Every face-scan route a person calls needs a verified user: a scan costs real money at Perfect Corp and a guest cannot see the result, so a guest's
+// call is pure cost. Each uses verifiedUser() as its early exit (403 VERIFICATION_REQUIRED for a guest, 401 with no token), before any body is parsed or
+// validated, so every route answers the same way; the service's requireVerified still decides. Only the photo link (a signed link) and the Perfect Corp
+// webhook (its signature) are credential-gated instead.
 const GUEST_REFUSED = 'Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. '
 
 // Room for the multipart framing around the photos. bodyLimit runs before the form is read, so an oversized upload is never buffered.
@@ -41,15 +40,15 @@ const setConsent = defineRoute({
   tags: ['Face scans'],
   summary: 'Say yes to keeping and analysing face photos',
   description:
-    GUEST_OPEN +
+    GUEST_REFUSED +
     'Consent belongs to the active profile. Send `{ version }`, the version of the consent wording the user agreed to: only the current one is accepted, ' +
     'any other is 400 `FACE_CONSENT_VERSION_MISMATCH` with `details.current`. Giving consent again, or after a withdrawal, is 200 and starts it afresh. ' +
     'A face scan is refused (409 `FACE_CONSENT_REQUIRED`) without a current consent.',
   security: bearer,
-  // Before the body is validated, so an unsigned caller with a bad or missing body is told 401, not 400.
-  middleware: [signedIn()],
+  // Before the body is validated, so a guest or an unsigned caller with a bad or missing body is told 403 or 401, not 400.
+  middleware: [verifiedUser()],
   request: { body: jsonBody(SetFaceConsentBody) },
-  responses: { 200: success(FaceConsentGivenResponse, 'The consent as given'), ...errorResponses(401) },
+  responses: { 200: success(FaceConsentGivenResponse, 'The consent as given'), ...errorResponses(401, 403) },
 })
 
 const getConsent = defineRoute({
@@ -85,7 +84,7 @@ const createFaceScan = defineRoute({
   tags: ['Face scans'],
   summary: 'Start a face scan from a front photo and optionally two side photos',
   description:
-    GUEST_OPEN +
+    GUEST_REFUSED +
     'Multipart: a `front` part, and optionally `right` and `left`. Every photo must be a JPEG of at most 6,000,000 bytes, with a shorter side of at least 1080 and a longer side of at most 4096 pixels. ' +
     'The checks run in this order and nothing is stored until all pass: 409 `FACE_CONSENT_REQUIRED` (no current consent for this profile), 409 `GOAL_REQUIRED` (pick a goal first), ' +
     '429 `FACE_SCAN_NOT_DUE`: the current goal\'s chase gets one scan, plus one wider check-in scan at its review point (issue #145). `details.reason` is ' +
@@ -93,14 +92,14 @@ const createFaceScan = defineRoute({
     'but has not reached its review point yet; `details.checkInDueAt` says when it will) or `check-in-taken` (the chase\'s check-in has already been taken) or `scan-limit` (a new chase\'s first scan waits 30 days after the profile\'s last day-one scan under any goal; check-ins neither count nor are limited; `details.nextScanAt` says when), then the photos: ' +
     '400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. One bad photo refuses the whole scan. ' +
     'The answer is 202 with the scan `analysing`; if the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202), and a new scan may be started. ' +
-    'Starting a scan costs nothing in the AI spend ledger. The answer shows no result; a guest follows the scan with `GET /api/v1/scans/faces/{id}/events` and must verify to read it. ' +
+    'Starting a scan costs nothing in the AI spend ledger. The answer shows no result; follow the scan with `GET /api/v1/scans/faces/{id}/events` or poll `GET /api/v1/scans/faces/{id}` for it. ' +
     'A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.',
   security: bearer,
-  // In this order: the address limit counts every caller, signedIn turns away the unsigned before anything is parsed, the user limit needs a user,
-  // and bodyLimit comes last because only a signed-in caller is worth reading a body for.
-  middleware: [rateLimit('FACE_SCAN_IP_LIMITER', 'ip'), signedIn(), rateLimit('FACE_SCAN_USER_LIMITER', 'user'), bodyLimit({ maxSize: MAX_FACE_SCAN_BODY_BYTES })],
+  // In this order: the address limit counts every caller, verifiedUser turns away the unsigned (401) and the guest (403) before anything is parsed, the
+  // user limit needs a user, and bodyLimit comes last because only a verified caller is worth reading a body for.
+  middleware: [rateLimit('FACE_SCAN_IP_LIMITER', 'ip'), verifiedUser(), rateLimit('FACE_SCAN_USER_LIMITER', 'user'), bodyLimit({ maxSize: MAX_FACE_SCAN_BODY_BYTES })],
   request: { body: multipartBody(CreateFaceScanBody) },
-  responses: { 202: success(FaceScanResponse, 'The scan, analysing'), ...errorResponses(401, 409, 413, 429) },
+  responses: { 202: success(FaceScanResponse, 'The scan, analysing'), ...errorResponses(401, 403, 409, 413, 429) },
 })
 
 const listFaceScans = defineRoute({
@@ -141,17 +140,17 @@ const watchFaceScan = defineRoute({
   tags: ['Face scans'],
   summary: 'Follow a face scan live, as server-sent events',
   description:
-    GUEST_OPEN +
-    'A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames carry only `id`, `state` and `reason`, never a result, scores or photo links, so a guest learns the next step ' +
-    'and must verify and call `GET /api/v1/scans/faces/{id}` for the result. Frames: `snapshot` first, whose data is `{ id, state, reason }` as the scan now is; then one `face` ' +
+    GUEST_REFUSED +
+    'A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames carry only `id`, `state` and `reason`, never a result, scores or photo links: ' +
+    'call `GET /api/v1/scans/faces/{id}` for the result. Frames: `snapshot` first, whose data is `{ id, state, reason }` as the scan now is; then one `face` ' +
     'with the same three fields each time its state changes; then `done` (data `{}`) once the scan is `ready`, `failed` or `needs-retake`, after which the server closes the stream. A scan that is ' +
     'already over gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, ' +
     'the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. ' +
     'Another profile\'s scan is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.',
   security: bearer,
-  middleware: [signedIn()],
+  middleware: [verifiedUser()],
   request: { params: FaceScanParams },
-  responses: { 200: sseResponse('The event stream'), ...errorResponses(401, 404) },
+  responses: { 200: sseResponse('The event stream'), ...errorResponses(401, 403, 404) },
 })
 
 const retakeFaceScan = defineRoute({
@@ -161,16 +160,16 @@ const retakeFaceScan = defineRoute({
   tags: ['Face scans'],
   summary: 'Send a new front photo for a scan that needs a retake',
   description:
-    GUEST_OPEN +
+    GUEST_REFUSED +
     'Multipart with a `front` part only, a JPEG held to the same rules as when the scan was started. For a scan whose `state` is `needs-retake`. The checks run in this order and nothing changes until all pass: ' +
-    '404 `FACE_SCAN_NOT_FOUND`, 409 `FACE_CONSENT_REQUIRED`, 409 `FACE_SCAN_NOT_AWAITING_RETAKE` (the scan is in any other state), then the photo: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, ' +
+    '403 `VERIFICATION_REQUIRED` (a guest), 404 `FACE_SCAN_NOT_FOUND`, 409 `FACE_CONSENT_REQUIRED`, 409 `FACE_SCAN_NOT_AWAITING_RETAKE` (the scan is in any other state), then the photo: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, ' +
     'and 400 `VALIDATION_FAILED` without a `front`. The new photo replaces the old and the scan is `analysing` again with no `reason`: 202 with the scan. If the analysis cannot be queued the scan is `failed` with ' +
     'reason `unavailable` (still 202). A retake is never refused for how many came before it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.',
   security: bearer,
   // The same order and reasons as createFaceScan, and the same limiters: a retake sends a photo to Perfect Corp, which is paid per use.
-  middleware: [rateLimit('FACE_SCAN_IP_LIMITER', 'ip'), signedIn(), rateLimit('FACE_SCAN_USER_LIMITER', 'user'), bodyLimit({ maxSize: MAX_RETAKE_BODY_BYTES })],
+  middleware: [rateLimit('FACE_SCAN_IP_LIMITER', 'ip'), verifiedUser(), rateLimit('FACE_SCAN_USER_LIMITER', 'user'), bodyLimit({ maxSize: MAX_RETAKE_BODY_BYTES })],
   request: { params: FaceScanParams, body: multipartBody(RetakeFaceScanBody) },
-  responses: { 202: success(FaceScanResponse, 'The scan, analysing again'), ...errorResponses(401, 404, 409, 413, 429) },
+  responses: { 202: success(FaceScanResponse, 'The scan, analysing again'), ...errorResponses(401, 403, 404, 409, 413, 429) },
 })
 
 const deleteFaceScan = defineRoute({

@@ -36,8 +36,8 @@ back last time. "SkinSense" and "Bare" are retired names.
 | Positioning       | A skin coach that starts with what you already own.                                                                                                                                                                                                                   |
 | Primary user      | Someone coming off a lightening or "glow" cream that has damaged their skin, who cannot reach a dermatologist.                                                                                                                                                        |
 | The "fairer" goal | A real goal that gets a real answer: a safe routine for brighter, more even, less sun-darkened skin, plus one warm, plain statement of what it can't do (change baseline colour). It is never a refusal or a lecture. Any lightening product on the shelf is flagged. |
-| Hero flow         | Goal → shelf photo → face photo → verdict → signup → plan (routine and taper schedule).                                                                                                                                                                               |
-| Signup            | Happens at the verdict, never before it. The headline verdict is free; saving it, the detail, the plan and reminders need an account. One screen.                                                                                                                     |
+| Hero flow         | Goal → shelf photo → signup → face photo → verdict → plan (routine and taper schedule).                                                                                                                                                                               |
+| Signup            | Happens before the face photo, never before the shelf photo. A guest can set a goal and photograph their shelf; the face scan needs an account, because every scan is paid for and a guest would get no result. One screen.                                           |
 | Identity          | A phone number (WhatsApp is the channel back to the user in Nigeria); email is optional. _Backend today:_ OTP goes by email (ZeptoMail) until Meta business verification clears; WhatsApp is the planned channel ("OTP over channels" in architecture.md).            |
 | Face photo        | Day-0 baseline, after the shelf and before the verdict. Described only by what can be seen ("redness around the nose"), never as a condition. May be shown back with overlays and change (see Safety). Skippable for privacy: loses the timeline, not the verdict.    |
 | Monetisation      | A premium subscription will exist at app-store launch. Its shape is undecided and deliberately designed separately. No affiliate income, ads or brand placement, ever.                                                                                                |
@@ -112,9 +112,10 @@ exist to undo.
 1. **Goal entry**: a free-text goal and an honest answer about what it takes. No signup, no photo, no good network needed.
 2. **Shelf entry**: photograph the shelf or each product. The app identifies them and the user confirms with a tap. Anything
    unreadable gets one follow-up, a photo of the back. Typing is the last resort.
-   - 2a. **Face photo**: a guided front, left and right capture, skippable.
-   - 2b. **Shelf verdict**: helping, redundant, blocking the goal, likely the problem, or conflicting, each with a one-line
-     reason. Then a one-screen signup. This is the moment we film for TikTok.
+   - 2a. **Signup**: one screen, before the face photo, because every face scan is paid for and a guest would get no result.
+   - 2b. **Face photo**: a guided front, left and right capture, skippable.
+   - 2c. **Shelf verdict**: helping, redundant, blocking the goal, likely the problem, or conflicting, each with a one-line
+     reason. This is the moment we film for TikTok.
 3. **Routine and taper schedule**: steps in order, with frequency and a reason each, and a dated step-down with what to
    expect.
 4. **Daily loop** (weeks 1 to 4): native reminders with tick-off actions, taper-day alarms, flare-up logging, a widget and

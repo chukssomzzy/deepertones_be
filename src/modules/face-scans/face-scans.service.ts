@@ -184,7 +184,7 @@ export class FaceScanService {
 
   /** Records the caller's profile's consent for the current wording. Any other version is 400 FACE_CONSENT_VERSION_MISMATCH, which says which is current. */
   async giveConsent(version: number): Promise<FaceConsentGiven> {
-    const { userId, profileId } = requireUser()
+    const { userId, profileId } = requireVerified()
     if (version !== CURRENT_FACE_CONSENT_VERSION) {
       throw new ValidationError('FACE_CONSENT_VERSION_MISMATCH', 'That is not the current version of the face photo consent', { current: CURRENT_FACE_CONSENT_VERSION })
     }
@@ -213,7 +213,7 @@ export class FaceScanService {
    * the job cannot be queued the scan is marked failed as unavailable and still returned, so the user can see and delete it.
    */
   async create(photos: FacePhotos): Promise<FaceScanView> {
-    const { userId, profileId } = requireUser()
+    const { userId, profileId } = requireVerified()
     await this.requireCurrentConsent(profileId)
     const goal = (await this.goals.requireGoal()).goal
     if (goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
@@ -488,11 +488,13 @@ export class FaceScanService {
   }
 
   /**
-   * Replaces the front photo of a scan that needs a retake and sends it for analysis again, with no limit on how often. The checks run in this order: the scan is
-   * the caller's (404), consent is current (409 FACE_CONSENT_REQUIRED), the scan is waiting for a retake (409 FACE_SCAN_NOT_AWAITING_RETAKE), then the photo (400).
-   * Nothing changes until all pass. When the analysis cannot be queued the scan is marked failed as unavailable and still returned, as `create` does.
+   * Replaces the front photo of a scan that needs a retake and sends it for analysis again, with no limit on how often. The checks run in this order: the
+   * caller is verified (403 VERIFICATION_REQUIRED), the scan is theirs (404), consent is current (409 FACE_CONSENT_REQUIRED), the scan is waiting for a
+   * retake (409 FACE_SCAN_NOT_AWAITING_RETAKE), then the photo (400). Nothing changes until all pass. When the analysis cannot be queued the scan is
+   * marked failed as unavailable and still returned, as `create` does.
    */
   async retake(id: string, photos: { front: ProductImage }): Promise<RetakenFaceScanView> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     await this.requireCurrentConsent(scan.profileId)
     if (scan.state !== 'needs-retake') throw FaceScanService.notAwaitingRetake()
@@ -604,8 +606,10 @@ export class FaceScanService {
    * Opens a live stream of the scan for the profile that made it (anyone else's scan is FACE_SCAN_NOT_FOUND). It starts with the scan's frame as it now is,
    * then carries each change, and `done` once the scan is over: ready, failed, or waiting for a retake. The snapshot is read before the stream opens, so the
    * scan is read again once it is open: a change stored in between is sent, and a scan that is over gets `done` straight away. A failure to send is logged.
+   * The caller must be verified (403 VERIFICATION_REQUIRED), checked before the scan is even looked at, so a guest learns nothing of whether the id exists.
    */
   async watch(id: string): Promise<Response> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     const stream = await this.events.subscribe(id, FaceScanService.frameOf(scan))
     try {
