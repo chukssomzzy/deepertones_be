@@ -18,6 +18,7 @@ import { MemoryEmailSender } from '../../src/providers/email/memory.email'
 import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
+import { FORBIDDEN_WORDING } from '../../src/modules/routines/routines.wording'
 import { applied, code, ruleRow, taperRow, word } from './admin.catalog.support'
 
 // GET /api/v1/me/verdict (spec #171, D2c) through the Worker's public surface: the typed client for the routes that already exist, the real entrypoint and real
@@ -124,13 +125,22 @@ type PublicProduct = {
   escalate: boolean
   sameJobAs?: string
   nudge?: string
+  suggest: string[]
 }
 type PublicTaper = { code: string; kind: string; schedule: { fromWeek: number; toWeek: number; frequency: string }[]; whatToExpect: string; seeAProfessionalIf: string }
-type ReadyView = { status: 'ready'; locked: false; fit: 'ready' | 'not-ready'; products: PublicProduct[]; tapers: PublicTaper[] }
+type ReadyView = { status: 'ready'; locked: false; fit: 'ready' | 'not-ready'; groups: GroupEntry[]; products: PublicProduct[]; tapers: PublicTaper[] }
 type Groups = { helping: number; redundant: number; blocking: number; conflicting: number; 'likely-the-problem': number; 'cant-tell': number; prescribed: number; undecided: number }
-type LockedView = { status: 'ready'; locked: true; fit: 'ready' | 'not-ready'; total: number; counts: Groups; escalates: number }
+type LockedView = { status: 'ready'; locked: true; fit: 'ready' | 'not-ready'; groups: GroupEntry[]; total: number; counts: Groups; escalates: number }
 type VerdictBody = { status: 'pending' } | ReadyView | LockedView
 const NO_GROUPS: Groups = { helping: 0, redundant: 0, blocking: 0, conflicting: 0, 'likely-the-problem': 0, 'cant-tell': 0, prescribed: 0, undecided: 0 }
+// #259 A2: every ready verdict also carries `groups` (the screen's headings, fixed copy) and every product `suggest` (what to do, fixed lines). The tests below that
+// compare a whole body say only that they are there; what they hold is pinned by the tests of their own further down and by verdicts.view.test.ts.
+const GROUP_ORDER = ['likely-the-problem', 'conflicting', 'cant-tell', 'blocking', 'redundant', 'helping', 'prescribed', 'undecided'] as const
+const SUGGEST = { suggest: expect.any(Array) }
+const GROUPS = { groups: expect.any(Array) }
+type GroupEntry = { group: string; title: string; subtitle: string; intro: string; count: number }
+const gateTrips = (text: string) => FORBIDDEN_WORDING.filter(({ pattern }) => pattern.test(text)).map(({ code: reason }) => reason)
+const countsByGroup = (groups: GroupEntry[]) => Object.fromEntries(groups.map(({ group, count }) => [group, count]))
 
 // --- people: a guest of one install, and the sign-in that makes the guest an account ---
 
@@ -432,7 +442,8 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
       status: 'ready',
       locked: false,
       fit: 'ready',
-      products: [{ entryId, ...shows(entryId), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false }],
+      ...GROUPS,
+      products: [{ entryId, ...shows(entryId), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST }],
       tapers: [],
     })
     expect(await dataOf(await getVerdict(guest))).toEqual(view)
@@ -454,20 +465,20 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
     await buildQueued(guest, { [twin]: { label: 'redundant', sameJobAs: helping } })
 
     const view = await dataOf<ReadyView>(await getVerdict(guest))
-    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
     expect(view).toMatchObject({ status: 'ready', locked: false, fit: 'ready' })
     const byId = new Map(view.products.map((product) => [product.entryId, product]))
     expect([...byId.keys()].sort()).toEqual([steroid, mercury, helping, twin, unlabelled].sort())
 
     // A steroid stops with its kind's step-down, named by the template's code, with no escalation.
-    expect(byId.get(steroid)).toEqual({ entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false })
+    expect(byId.get(steroid)).toEqual({ entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false, ...SUGGEST })
     // Mercury stops at once, with no step-down, and routes to a professional.
-    expect(byId.get(mercury)).toEqual({ entryId: mercury, ...shows(mercury), group: 'likely-the-problem', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: true })
+    expect(byId.get(mercury)).toEqual({ entryId: mercury, ...shows(mercury), group: 'likely-the-problem', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: true, ...SUGGEST })
     // The judge's words are the reason as given, and a redundant product names the product that stays and does its job.
-    expect(byId.get(helping)).toEqual({ entryId: helping, ...shows(helping), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false })
-    expect(byId.get(twin)).toEqual({ entryId: twin, ...shows(twin), group: 'redundant', verdict: { kind: 'drop' }, reason: 'Reason: redundant.', escalate: false, sameJobAs: helping })
+    expect(byId.get(helping)).toEqual({ entryId: helping, ...shows(helping), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST })
+    expect(byId.get(twin)).toEqual({ entryId: twin, ...shows(twin), group: 'redundant', verdict: { kind: 'drop' }, reason: 'Reason: redundant.', escalate: false, sameJobAs: helping, ...SUGGEST })
     // A product nothing could be read from is set aside with the nudge to photograph the back label.
-    expect(byId.get(unlabelled)).toEqual({ entryId: unlabelled, ...shows(unlabelled), group: 'cant-tell', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: false, nudge: 'photograph-back-label' })
+    expect(byId.get(unlabelled)).toEqual({ entryId: unlabelled, ...shows(unlabelled), group: 'cant-tell', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: false, nudge: 'photograph-back-label', ...SUGGEST })
     for (const product of view.products) expect(product.reason.length).toBeGreaterThan(0)
 
     // Only the template a stopped product uses comes with it (taperRow's schedule is '1-2: alternate-days; 3-4: weekly; 5: stop').
@@ -508,6 +519,94 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
   })
 })
 
+describe('GET /api/v1/me/verdict: the groups and the suggested lines of the full verdict (#259 A2)', () => {
+  /** A member whose shelf holds a steroid cream, a mercury cream, a serum, its twin and a tub with no label, and whose verdict has been built. Answers the entry ids. */
+  const builtMemberShelf = async () => {
+    const guest = await newMember()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    const steroid = await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
+    const mercury = await onShelf(guest, [...CLEAN, MERCURY_INGREDIENT])
+    const helping = await onShelf(guest)
+    const twin = await onShelf(guest)
+    const unlabelled = await noLabelOnShelf(guest, 'moisturise')
+    await getVerdict(guest)
+    await buildQueued(guest, { [twin]: { label: 'redundant', sameJobAs: helping } })
+    return { guest, steroid, mercury, helping, twin, unlabelled }
+  }
+
+  it('lists all eight groups in the owner\'s order with the number of products in each, the empty ones at 0', async () => {
+    const { guest } = await builtMemberShelf()
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    expect(view.groups.map(({ group }) => group)).toEqual([...GROUP_ORDER])
+    // steroid cream and mercury cream (likely-the-problem), the serum (helping), its twin (redundant), the tub nothing could be read from (cant-tell).
+    expect(countsByGroup(view.groups)).toEqual({ ...NO_GROUPS, 'likely-the-problem': 2, helping: 1, redundant: 1, 'cant-tell': 1 })
+    expect(countsByGroup(view.groups)).toEqual(Object.fromEntries(GROUP_ORDER.map((group) => [group, view.products.filter((product) => product.group === group).length])))
+  })
+
+  it('gives each group its title, subtitle and intro as fixed words, the same on every ask, with titles and subtitles as the owner\'s screen has them', async () => {
+    const { guest } = await builtMemberShelf()
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    for (const entry of view.groups) {
+      expect(Object.keys(entry).sort(), entry.group).toEqual(['count', 'group', 'intro', 'subtitle', 'title'])
+      for (const text of [entry.title, entry.subtitle, entry.intro]) expect(text.trim().length, entry.group).toBeGreaterThan(0)
+      for (const text of [entry.title, entry.subtitle, entry.intro]) expect(gateTrips(text), `${entry.group}: "${text}"`).toEqual([])
+    }
+    const byGroup = new Map(view.groups.map((entry) => [entry.group, entry]))
+    expect(byGroup.get('helping')).toMatchObject({ title: 'Helping', subtitle: 'Working toward your goal' })
+    expect(byGroup.get('redundant')).toMatchObject({ title: 'Redundant', subtitle: 'Doing the same job as another' })
+    expect(byGroup.get('blocking')).toMatchObject({ title: 'Blocking your goal', subtitle: 'Holding your goal back' })
+    expect(byGroup.get('conflicting')).toMatchObject({ title: 'Conflicting', subtitle: "Don't work well together" })
+    expect(byGroup.get('likely-the-problem')).toMatchObject({ title: 'Likely the problem', subtitle: "What's causing trouble" })
+    expect(byGroup.get('undecided')).toMatchObject({ title: 'Still checking' })
+    expect(await dataOf<ReadyView>(await getVerdict(guest))).toEqual(view)
+  })
+
+  it('suggests what to do with each product from its verdict: keep, step down by its kind, stop now (with a professional when it escalates), and photograph the back label of a can\'t-tell one', async () => {
+    const { guest, steroid, mercury, helping, twin, unlabelled } = await builtMemberShelf()
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    const lines = (entryId: string) => view.products.find((product) => product.entryId === entryId)!.suggest
+    for (const product of view.products) {
+      expect(product.suggest.length, product.group).toBeGreaterThanOrEqual(1)
+      expect(product.suggest.length, product.group).toBeLessThanOrEqual(3)
+      for (const line of product.suggest) {
+        expect(line.trim().length).toBeGreaterThan(0)
+        expect(gateTrips(line), `"${line}"`).toEqual([])
+      }
+    }
+    expect(lines(helping)).toHaveLength(1)
+    // The steroid is stopped by its step-down: named by its kind, and never stopped suddenly.
+    expect(lines(steroid).join(' ')).toMatch(/steroid/i)
+    expect(lines(steroid).join(' ')).toMatch(/\b(?:never|don't|do not)\b[^.]*\b(?:suddenly|abruptly|all at once)\b/i)
+    // Mercury is stopped at once and goes to a professional; the redundant twin is stopped at once and does not.
+    expect(lines(mercury).join(' ')).toMatch(/\bstop\b/i)
+    expect(lines(mercury).join(' ')).toMatch(/professional/i)
+    expect(lines(twin).join(' ')).toMatch(/\bstop\b/i)
+    expect(lines(twin).join(' ')).not.toMatch(/professional/i)
+    // The tub nothing could be read from is asked to be photographed; no other product is.
+    expect(lines(unlabelled).join(' ')).toMatch(/photograph/i)
+    for (const other of [steroid, mercury, helping, twin]) expect(lines(other).join(' ')).not.toMatch(/photograph/i)
+  })
+
+  it('answers pending with no groups for a member whose verdict is not built yet', async () => {
+    const guest = await newMember()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    await onShelf(guest)
+
+    const body = await dataOf<Record<string, unknown>>(await getVerdict(guest))
+
+    expect(body).toEqual({ status: 'pending' })
+    expect(body).not.toHaveProperty('groups')
+  })
+})
+
 describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict product', () => {
   it('gives each product exactly the kind and the product or noLabel that GET /me/shelf/{entryId} gives for its entry, so the verdict reads without a second call', async () => {
     const guest = await newMember()
@@ -537,7 +636,7 @@ describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict pro
     expect(byId.get(unlabelled)).toMatchObject({ kind: 'no-label', noLabel: { purpose: 'moisturise', source: 'market-vendor', usedFor: '6-months-2-years', description: 'A tub from the market' } })
     expect(byId.get(unlabelled)).not.toHaveProperty('product')
     // The body has the same top-level shape as before: the product's fields sit on each product, not beside the verdict.
-    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
   })
 
   it('still gives only the fields it names: the product adds none of how the rules reached a verdict', async () => {
@@ -550,7 +649,7 @@ describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict pro
 
     const [item] = (await dataOf<ReadyView>(await getVerdict(guest))).products
 
-    expect(Object.keys(item!).sort()).toEqual(['entryId', 'escalate', 'group', 'kind', 'product', 'reason', 'verdict'])
+    expect(Object.keys(item!).sort()).toEqual(['entryId', 'escalate', 'group', 'kind', 'product', 'reason', 'suggest', 'verdict'])
   })
 
   it('reads the product when it is asked, with no new build: it is not what the verdict was built from', async () => {
@@ -615,12 +714,33 @@ describe('GET /api/v1/me/verdict: a guest is given the locked preview, never the
       // steroid cream and mercury cream (likely-the-problem), the serum (helping), its twin (redundant), the tub nothing could be read from (cant-tell).
       total: 5,
       counts: { ...NO_GROUPS, helping: 1, redundant: 1, 'likely-the-problem': 2, 'cant-tell': 1 },
+      ...GROUPS,
       // Only the mercury cream routes to a professional; the guest is told how many, never which.
       escalates: 1,
     })
-    expect(Object.keys(body.data).sort()).toEqual(['counts', 'escalates', 'fit', 'locked', 'status', 'total'])
+    expect(Object.keys(body.data).sort()).toEqual(['counts', 'escalates', 'fit', 'groups', 'locked', 'status', 'total'])
     expect(Object.keys(body.data.counts).sort()).toEqual(Object.keys(NO_GROUPS).sort())
     for (const field of ['products', 'tapers', 'entryId', 'reason', 'verdict']) expect(raw).not.toContain(`"${field}"`)
+  })
+
+  it('gives the preview the same eight groups as the full verdict, in the owner\'s order, with counts equal to `counts`, and no product, reason or line of advice', async () => {
+    const guest = await builtShelf()
+
+    const res = await getVerdict(guest)
+
+    const preview = await dataOf<LockedView>(res)
+    expect(preview.groups.map(({ group }) => group)).toEqual([...GROUP_ORDER])
+    expect(countsByGroup(preview.groups)).toEqual(preview.counts)
+    expect(countsByGroup(preview.groups)).toEqual({ ...NO_GROUPS, helping: 1, redundant: 1, 'likely-the-problem': 2, 'cant-tell': 1 })
+    for (const entry of preview.groups) {
+      expect(Object.keys(entry).sort(), entry.group).toEqual(['count', 'group', 'intro', 'subtitle', 'title'])
+      for (const text of [entry.title, entry.subtitle, entry.intro]) expect(gateTrips(text), `${entry.group}: "${text}"`).toEqual([])
+    }
+    expect(JSON.stringify(preview)).not.toContain('suggest')
+    // After signing up the same words are on the full verdict.
+    await guest.signUp()
+    const full = await dataOf<ReadyView>(await getVerdict(guest))
+    expect(full.groups).toEqual(preview.groups)
   })
 
   it('shows nothing a member of the same profile is shown: no entry id, product name, brand, reason, step-down or word of the rules appears anywhere in the guest\'s body', async () => {
@@ -656,8 +776,25 @@ describe('GET /api/v1/me/verdict: a guest is given the locked preview, never the
       fit: 'not-ready',
       total: 2,
       counts: { ...NO_GROUPS, undecided: 1, 'likely-the-problem': 1 },
+      ...GROUPS,
       escalates: 0,
     })
+  })
+
+  it('counts the products the judge has not decided under Still checking, on the groups of the preview as well as in `counts`', async () => {
+    const guest = await newGuest()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    await onShelf(guest)
+    await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
+    await getVerdict(guest)
+    await buildWithFitFailing(guest)
+
+    const preview = await dataOf<LockedView>(await getVerdict(guest))
+
+    expect(preview.fit).toBe('not-ready')
+    expect(countsByGroup(preview.groups)).toEqual({ ...NO_GROUPS, undecided: 1, 'likely-the-problem': 1 })
+    expect(preview.groups.find(({ group }) => group === 'undecided')!.title).toBe('Still checking')
   })
 })
 
@@ -672,7 +809,7 @@ describe('GET /api/v1/me/verdict: a guest who signs up', () => {
     await getVerdict(guest)
     const calls = await buildQueued(guest)
     const asGuest = await dataOf<LockedView>(await getVerdict(guest))
-    expect(asGuest).toEqual({ status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, escalates: 0 })
+    expect(asGuest).toEqual({ status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, ...GROUPS, escalates: 0 })
     const queuedBefore = queuedFor(guest).length
 
     await guest.signUp()
@@ -684,9 +821,10 @@ describe('GET /api/v1/me/verdict: a guest who signs up', () => {
       status: 'ready',
       locked: false,
       fit: 'ready',
+      ...GROUPS,
       products: [
-        { entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false },
-        { entryId: serum, ...shows(serum), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false },
+        { entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false, ...SUGGEST },
+        { entryId: serum, ...shows(serum), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST },
       ],
       tapers: [expect.objectContaining({ code: STEROID_TAPER, kind: 'steroid' })],
     })
@@ -763,7 +901,8 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
       status: 'ready',
       locked: false,
       fit: 'not-ready',
-      products: [{ entryId, ...shows(entryId), group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false }],
+      ...GROUPS,
+      products: [{ entryId, ...shows(entryId), group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, ...SUGGEST }],
       tapers: [],
     })
   })
@@ -783,9 +922,31 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
     expect(view).toMatchObject({ status: 'ready', locked: false, fit: 'ready', tapers: [] })
     const byId = new Map(view.products.map((product) => [product.entryId, product]))
     // The judge named no pick, so the floor's tie-break reduces the add-on (the acid) before the treatment.
-    expect(byId.get(acid)).toEqual({ entryId: acid, ...shows(acid), group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, reason: expect.any(String), escalate: false })
+    expect(byId.get(acid)).toEqual({ entryId: acid, ...shows(acid), group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, reason: expect.any(String), escalate: false, ...SUGGEST })
     expect(byId.get(acid)!.reason.length).toBeGreaterThan(0)
-    expect(byId.get(retinoid)).toEqual({ entryId: retinoid, ...shows(retinoid), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false })
+    expect(byId.get(retinoid)).toEqual({ entryId: retinoid, ...shows(retinoid), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST })
+  })
+
+  it('suggests the frequency, in plain words, for a product reduced to alternate days', async () => {
+    const guest = await newMember()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    await onShelf(guest, [...CLEAN, RETINOID_INGREDIENT])
+    const acid = await onShelf(guest, [...CLEAN, ACID_INGREDIENT])
+    await getVerdict(guest)
+    await buildQueued(guest)
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    const reduced = view.products.find((product) => product.entryId === acid)!
+    expect(reduced.verdict).toEqual({ kind: 'reduce', maxFrequency: 'alternate-days' })
+    expect(reduced.suggest.length).toBeGreaterThanOrEqual(1)
+    expect(reduced.suggest.length).toBeLessThanOrEqual(3)
+    for (const line of reduced.suggest) {
+      expect(line.toLowerCase()).not.toContain('alternate-days')
+      expect(gateTrips(line), `"${line}"`).toEqual([])
+    }
+    expect(reduced.suggest).not.toEqual(view.products.find((product) => product.entryId !== acid)!.suggest)
   })
 
   it('shows a product the user said a doctor prescribed as prescribed and kept, whatever the rules would say of its ingredients', async () => {
@@ -805,7 +966,8 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
       status: 'ready',
       locked: false,
       fit: 'ready',
-      products: [{ entryId, ...shows(entryId), group: 'prescribed', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false }],
+      ...GROUPS,
+      products: [{ entryId, ...shows(entryId), group: 'prescribed', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, ...SUGGEST }],
       tapers: [],
     })
   })

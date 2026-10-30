@@ -1,9 +1,10 @@
 import type { z } from '@hono/zod-openapi'
 import type { TaperRow } from '../catalog/catalog.workbook.schema'
 import { toNoLabelResponse, toProductResponse } from '../scans/scans.presenter'
+import { DROP_SUGGESTION, ESCALATE_SUGGESTION, GROUP_COPY, GROUP_ORDER, KEEP_SUGGESTION, PHOTOGRAPH_SUGGESTION, reduceSuggestion, stopSuggestion } from './verdicts.screen-copy'
 import type { VerdictGroup } from './verdicts.merge'
 import type { SavedVerdictProduct, ShownVerdictProduct } from './verdicts.types'
-import type { ShelfVerdictResponse, VerdictProductResponse, VerdictTaperResponse } from './verdicts.schemas'
+import type { ShelfVerdictResponse, VerdictGroupResponse, VerdictProductResponse, VerdictTaperResponse } from './verdicts.schemas'
 
 /** What a guest is given of a ready verdict (owner decision, spec #171): how many products fall in each group, never which, so it cannot be read as the verdict. */
 export type VerdictPreview = { status: 'ready'; locked: true; fit: 'ready' | 'not-ready'; total: number; counts: Record<VerdictGroup, number>; escalates: number }
@@ -38,9 +39,25 @@ export const previewOf = (fit: 'ready' | 'not-ready', products: readonly SavedVe
 
 type PublicProduct = z.infer<typeof VerdictProductResponse>
 
+// Fixed copy beside each group's count, in the screen's order and always all of them: the app hides the zeros.
+const groupsOf = (counts: Record<VerdictGroup, number>): z.infer<typeof VerdictGroupResponse>[] => GROUP_ORDER.map((group) => ({ group, ...GROUP_COPY[group], count: counts[group] }))
+
+// What to do with a product, from its verdict alone (the stop line reads the kind of the step-down it names), never from a model.
+const suggestionsFor = ({ group, verdict, escalate }: ShownVerdictProduct, tapers: readonly TaperRow[]): string[] => {
+  const lines =
+    verdict.kind === 'keep'
+      ? [KEEP_SUGGESTION]
+      : verdict.kind === 'reduce'
+        ? [reduceSuggestion(verdict.maxFrequency)]
+        : verdict.kind === 'stop'
+          ? stopSuggestion(tapers.find(({ code }) => code === verdict.taperTemplateId)?.kind)
+          : [DROP_SUGGESTION, ...(escalate ? [ESCALATE_SUGGESTION] : [])]
+  return group === 'cant-tell' ? [...lines, PHOTOGRAPH_SUGGESTION] : lines
+}
+
 // Written out field by field: `facts`, `step` and `sourceUrls` are how the rules reached a verdict, not what the user is shown, and a field added to the saved
 // product later must not reach a client unless it is named here.
-const toProduct = (shown: ShownVerdictProduct): PublicProduct => {
+const toProduct = (shown: ShownVerdictProduct, tapers: readonly TaperRow[]): PublicProduct => {
   const { entryId, group, verdict, reason, escalate, sameJobAs, nudge } = shown
   return {
     entryId,
@@ -56,6 +73,7 @@ const toProduct = (shown: ShownVerdictProduct): PublicProduct => {
     escalate,
     ...(sameJobAs === undefined ? {} : { sameJobAs }),
     ...(nudge === undefined ? {} : { nudge }),
+    suggest: suggestionsFor(shown, tapers),
   }
 }
 
@@ -72,6 +90,8 @@ const toTaper = ({ code, kind, schedule, whatToExpect, seeAProfessionalIf }: Tap
 // The service sends this same body on the event stream, and the routes answer it: one mapping, in a file both may import.
 export const toShelfVerdictResponse = (view: VerdictView): z.infer<typeof ShelfVerdictResponse> => {
   if (view.status === 'pending') return { status: 'pending' }
-  if (view.locked) return view
-  return { status: 'ready', locked: false, fit: view.fit, products: view.products.map(toProduct), tapers: view.tapers.map(toTaper) }
+  if (view.locked) return { ...view, groups: groupsOf(view.counts) }
+  const counts = { ...NO_PRODUCTS }
+  for (const { group } of view.products) counts[group]++
+  return { status: 'ready', locked: false, fit: view.fit, groups: groupsOf(counts), products: view.products.map((shown) => toProduct(shown, view.tapers)), tapers: view.tapers.map(toTaper) }
 }
