@@ -114,6 +114,10 @@ type World = {
   removed: { id: string; reason: string | null }[]
   /** The catalog product of a removed entry, by entry id: only the tests that put a removed product back on the shelf set one. */
   removedProducts: Map<string, string>
+  /** The right product of each swapped entry (#259 B5), by entry id: the `newProductId` of its latest wrong-match report. An entry with no report is absent. */
+  swapReports: Map<string, string>
+  /** The entry ids each read of the swap reports asked for, in order: a test that expects no read finds it empty. */
+  swapReads: string[][]
   /** The step-down templates the workbook holds, by code. */
   templates: Map<string, TaperRow>
   facts: Map<string, ShelfFacts>
@@ -205,6 +209,8 @@ const newWorld = (): World => ({
   entries: [],
   removed: [],
   removedProducts: new Map(),
+  swapReports: new Map(),
+  swapReads: [],
   templates: new Map([[STEROID_TEMPLATE.code, STEROID_TEMPLATE]]),
   facts: new Map(),
   // Cheapest first, as the recommendation rules give them. SERUM-1 is sold in NG only.
@@ -422,6 +428,12 @@ beforeEach(() => {
         return { status: 'started' as const, scanId: 'scan-1', itemId: 'item-1' }
       },
     } satisfies Pick<ShelfService, 'activeEntriesFor' | 'removedEntriesFor' | 'removedProductIdsFor' | 'add'>,
+    swaps: {
+      rightProductsFor: async (_profileId: string, entryIds: string[]) => {
+        world.swapReads.push([...entryIds])
+        return new Map(entryIds.flatMap((id): [string, string][] => (world.swapReports.has(id) ? [[id, world.swapReports.get(id)!]] : [])))
+      },
+    } satisfies RoutineServiceDeps['swaps'],
     catalog: {
       shelfFacts: async (formulationIds: string[]) => new Map(formulationIds.flatMap((id): [string, ShelfFacts][] => (world.facts.has(id) ? [[id, structuredClone(world.facts.get(id)!)]] : []))),
     } satisfies Pick<ProductCatalogService, 'shelfFacts'>,
@@ -4205,6 +4217,213 @@ describe('RoutineService.build: a running step-down survives its product\'s remo
       await startedWithTaper()
       removeSteroid(null)
       putBack()
+      onDay(14)
+
+      await requestIfStale()
+      expect(queued()).toHaveLength(1)
+      await run(queuedBody())
+      expect((await currentRow()).tapers).toEqual([{ shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }])
+
+      await requestIfStale()
+
+      expect(queued()).toHaveLength(1)
+    })
+  })
+
+  // The owner's rule (2026-10-30, #259 B5): a wrong-product swap carries a running step-down through, since the swap removes the wrong entry now and the right product's entry only
+  // appears when its scan is ready. The right product is the `newProductId` of the entry's latest wrong-match report; with no report the step-down ends as before.
+  describe('a wrong-product swap', () => {
+    const RIGHT = 'prod-right'
+    /** The wrong cream is swapped out: removed as wrong-product, with the report the swap wrote (unless the best-effort write failed). */
+    const swapOut = (report: string | null = RIGHT) => {
+      removeSteroid('wrong-product')
+      if (report !== null) world.swapReports.set('entry-b', report)
+    }
+    /** The right product arrives on the shelf as a new entry, with the verdict the rules gave it. */
+    const arrives = (id = 'entry-d', verdict: ShelfVerdict = { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, productId = RIGHT) => {
+      addProduct(id, STEROID, { productId })
+      world.entries = world.entries.map((entry) => (entry.id === id && entry.kind === 'product' ? { ...entry, productId } : entry))
+      saveVerdict([...productsOfVerdict(), verdictProduct(id, verdict, verdict.kind === 'keep' ? 'moisturise' : null, { sourceUrls: [STEROID_SOURCE] })])
+    }
+
+    it('carries the step-down with its start date while the right product is not on the shelf yet, and runs it to its last week', async () => {
+      await startedWithTaper()
+      swapOut()
+      onDay(14)
+      await build('shelf')
+      expect((await currentRow()).tapers).toEqual(CARRIED)
+
+      reverdict()
+      onDay(27)
+      await build('verdict')
+      expect((await currentRow()).tapers).toEqual(CARRIED)
+
+      reverdict()
+      onDay(28)
+      await build('verdict')
+      expect((await currentRow()).tapers).toEqual([])
+    })
+
+    it('continues it on the right product\'s entry once it arrives stopped on the same template: the same start date, and no carried copy', async () => {
+      await startedWithTaper()
+      swapOut()
+      arrives()
+      onDay(14)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([{ shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }])
+    })
+
+    it('continues it when the writer must be asked too, and a later rebuild keeps it', async () => {
+      await startedWithTaper()
+      retireSerum1()
+      swapOut()
+      arrives()
+      onDay(14)
+
+      await build('shelf')
+      expect(await currentRow()).toMatchObject({ source: 'writer', tapers: [{ shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }] })
+
+      reverdict()
+      onDay(20)
+      await build('verdict')
+      expect((await currentRow()).tapers).toEqual([{ shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }])
+    })
+
+    it('ends the step-down when the right product arrives and the rules keep it', async () => {
+      await startedWithTaper()
+      swapOut()
+      arrives('entry-d', { kind: 'keep' })
+      onDay(14)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([])
+    })
+
+    it('ends it when the right product is stopped on another template, and the new stop begins today as a new step-down', async () => {
+      await startedWithTaper()
+      world.templates.set('TPR-OTHER-1', taperTemplate('TPR-OTHER-1', 4))
+      swapOut()
+      arrives('entry-d', { kind: 'stop', taperTemplateId: 'TPR-OTHER-1' })
+      onDay(14)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([{ shelfProductId: 'entry-d', templateId: 'TPR-OTHER-1', startedOn: dayOf(14) }])
+    })
+
+    it('does not carry it for a product that is not the right one: another product stopped on the template is a new step-down, and the swapped-out one is carried on', async () => {
+      await startedWithTaper()
+      swapOut()
+      arrives('entry-d', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, 'prod-another')
+      onDay(14)
+
+      await build('shelf')
+
+      const { tapers } = await currentRow()
+      expect(tapers).toHaveLength(2)
+      expect(tapers).toEqual(expect.arrayContaining([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }, { shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: dayOf(14) }]))
+    })
+
+    it('ends it with no wrong-match report (the best-effort write failed), as a wrong-product removal did before', async () => {
+      await startedWithTaper()
+      swapOut(null)
+      onDay(14)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([])
+    })
+
+    it('begins a product stopped on the shelf as a new step-down today when there is no report to say it is the right one', async () => {
+      await startedWithTaper()
+      swapOut(null)
+      arrives()
+      onDay(14)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([{ shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: dayOf(14) }])
+    })
+
+    it('leaves the right product\'s own step-down as it is, and ends the swapped-out one, when the right product was already on the shelf with one', async () => {
+      await startedWithTaper()
+      addProduct('entry-c', STEROID, { name: 'Second Cream', productId: RIGHT })
+      world.entries = world.entries.map((entry) => (entry.id === 'entry-c' && entry.kind === 'product' ? { ...entry, productId: RIGHT } : entry))
+      saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, null, { sourceUrls: [STEROID_SOURCE] })])
+      onDay(7)
+      await build('shelf')
+      expect((await currentRow()).tapers).toEqual(expect.arrayContaining([{ shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: dayOf(7) }]))
+      swapOut()
+      onDay(14)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([{ shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: dayOf(7) }])
+    })
+
+    it('drops a carried step-down past its last week, though the right product never arrived', async () => {
+      await startedWithTaper()
+      swapOut()
+      onDay(28)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([])
+    })
+
+    it('does not carry the step-down of a routine that was never Started', async () => {
+      await firstBuild()
+      swapOut()
+      setClock(DAY)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([])
+    })
+
+    it.each([
+      ['stopped', 'stopped'],
+      ['not-mine', 'not-mine'],
+    ])('still ends it when the removal was %s, though a report names a right product, and reads no report', async (_name, reason) => {
+      await startedWithTaper()
+      removeSteroid(reason)
+      world.swapReports.set('entry-b', RIGHT)
+      onDay(14)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([])
+      expect(world.swapReads).toEqual([])
+    })
+
+    it('reads no swap report when no step-down was removed as wrong-product', async () => {
+      await startedWithTaper()
+      removeSteroid(null)
+      onDay(14)
+      await build('shelf')
+      reverdict()
+      await requestIfStale()
+
+      expect(world.swapReads).toEqual([])
+    })
+
+    it('reads the swap reports of the gone entries removed as wrong-product only', async () => {
+      await startedWithTaper()
+      swapOut()
+      onDay(14)
+
+      await build('shelf')
+
+      expect(world.swapReads).toEqual([['entry-b']])
+    })
+
+    it('makes the stale read settle once the rebuild has continued it', async () => {
+      await startedWithTaper()
+      swapOut()
+      arrives()
       onDay(14)
 
       await requestIfStale()

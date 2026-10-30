@@ -15,6 +15,10 @@ import type { VerdictReportsRepository } from './verdicts.reports.repository'
 //   recordWrongMatch(report, now): Promise<void>
 //       report = { id, profileId, entryId, oldProductId, newProductId }. A plain insert: kind 'wrong-match', group, verdict, basis, fingerprint and note null, createdAt = updatedAt = now.
 //       No uniqueness: the same entry may be recorded twice. It never collides with a mistake report on the same entry.
+//   wrongMatchesFor(profileId, entryIds): Promise<Map<string, string>>
+//       For each of the profile's entries that has a `wrong-match` report, the entry id to the `newProductId` of its LATEST report (by createdAt, whatever order they were written in).
+//       Only `wrong-match` rows and only that profile's are read; an entry with none is absent from the map, and no ids answers an empty map. Any number of ids is allowed (the
+//       D1 class reads them in chunks under the 100-parameter limit). The routines module reads it, through a narrow structural dependency, to follow a wrong-product swap.
 //   find(id): Promise<VerdictReport | null>
 //       The row whole: { id, profileId, entryId, kind, group, verdict, basis, fingerprint, note, oldProductId, newProductId, createdAt, updatedAt }, or null. This read exists so the
 //       contract (and nothing else) can see what a write did; the product has no triage screen (the team reads the table).
@@ -241,6 +245,76 @@ export const verdictReportsRepositoryContract = (name: string, make: () => Verdi
 
         expect(await repository.find(first.id)).toMatchObject({ profileId: amara, note: 'Amara\'s note' })
         expect(await repository.find(second.id)).toMatchObject({ profileId: tolu, note: 'Tolu\'s note' })
+      })
+    })
+
+    describe('wrongMatchesFor', () => {
+      it('answers the new product of the latest report for each entry, by createdAt rather than by the order they were written', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.recordWrongMatch(wrongMatchFor(profileId, { entryId: 'entry-1', newProductId: 'product-later' }), at(2 * MINUTE))
+        await repository.recordWrongMatch(wrongMatchFor(profileId, { entryId: 'entry-1', newProductId: 'product-earlier' }), at(MINUTE))
+        await repository.recordWrongMatch(wrongMatchFor(profileId, { entryId: 'entry-2', newProductId: 'product-other' }), BASE)
+
+        expect(await repository.wrongMatchesFor(profileId, ['entry-1', 'entry-2'])).toEqual(
+          new Map([
+            ['entry-1', 'product-later'],
+            ['entry-2', 'product-other'],
+          ]),
+        )
+      })
+
+      it('leaves out an entry with no report, and an entry that was not asked for', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.recordWrongMatch(wrongMatchFor(profileId, { entryId: 'entry-1', newProductId: 'product-1' }), BASE)
+        await repository.recordWrongMatch(wrongMatchFor(profileId, { entryId: 'entry-2', newProductId: 'product-2' }), BASE)
+
+        expect(await repository.wrongMatchesFor(profileId, ['entry-1', 'entry-3'])).toEqual(new Map([['entry-1', 'product-1']]))
+      })
+
+      it('reads only wrong-match reports: a mistake report on the entry is not an answer', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.upsertMistake(mistakeFor(profileId, { entryId: 'entry-1' }), at(5 * MINUTE))
+
+        expect(await repository.wrongMatchesFor(profileId, ['entry-1'])).toEqual(new Map())
+
+        await repository.recordWrongMatch(wrongMatchFor(profileId, { entryId: 'entry-1', newProductId: 'product-right' }), BASE)
+        expect(await repository.wrongMatchesFor(profileId, ['entry-1'])).toEqual(new Map([['entry-1', 'product-right']]))
+      })
+
+      it('reads only the profile\'s own reports, though another profile reported the same entry id', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId: amara } = await newAccount()
+        const { profileId: tolu } = await newAccount()
+        await repository.recordWrongMatch(wrongMatchFor(amara, { entryId: 'entry-1', newProductId: 'product-amara' }), BASE)
+        await repository.recordWrongMatch(wrongMatchFor(tolu, { entryId: 'entry-1', newProductId: 'product-tolu' }), at(MINUTE))
+
+        expect(await repository.wrongMatchesFor(amara, ['entry-1'])).toEqual(new Map([['entry-1', 'product-amara']]))
+        expect(await repository.wrongMatchesFor(tolu, ['entry-1'])).toEqual(new Map([['entry-1', 'product-tolu']]))
+      })
+
+      it('answers an empty map for no ids', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.recordWrongMatch(wrongMatchFor(profileId), BASE)
+
+        expect(await repository.wrongMatchesFor(profileId, [])).toEqual(new Map())
+      })
+
+      it('reads more ids than one statement can bind (D1 allows 100)', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const ids = Array.from({ length: 250 }, (_, i) => `entry-${i}`)
+        for (const id of ids.filter((_, i) => i % 5 === 0)) await repository.recordWrongMatch(wrongMatchFor(profileId, { entryId: id, newProductId: `product-of-${id}` }), BASE)
+
+        const found = await repository.wrongMatchesFor(profileId, ids)
+
+        expect(found.size).toBe(50)
+        expect(found.get('entry-0')).toBe('product-of-entry-0')
+        expect(found.get('entry-245')).toBe('product-of-entry-245')
+        expect(found.has('entry-1')).toBe(false)
       })
     })
 

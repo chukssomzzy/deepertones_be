@@ -44,6 +44,8 @@ export type RoutineServiceDeps = {
   goals: Pick<GoalsService, 'goalFor'>
   safety: Pick<SafetyService, 'snapshotFor'>
   shelf: Pick<ShelfService, 'activeEntriesFor' | 'removedEntriesFor' | 'removedProductIdsFor' | 'add'>
+  /** The right product of a wrong-product swap (#259 B5), by swapped-out entry id: the new product of the entry's latest wrong-match report. An entry with no report is absent. A structural dependency, so this module does not import verdicts. */
+  swaps: { rightProductsFor(profileId: string, entryIds: string[]): Promise<Map<string, string>> }
   catalog: Pick<ProductCatalogService, 'shelfFacts'>
   faceScans: Pick<FaceScanService, 'seenFor'>
   workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'countries' | 'tapersByCode'>
@@ -111,6 +113,8 @@ export class RoutineService {
   private static readonly WEEK_DAYS = 7
   // The only reasons a shelf entry can be removed with and its running step-down go on; any other (or later) reason ends it.
   private static readonly CARRYING_REMOVAL_REASONS: readonly (ShelfRemovedReason | null)[] = [null, 'finished']
+  // The reason the shelf swap removes the wrong entry with: its step-down goes on only if the right product is named by the swap's report (#259 B5).
+  private static readonly SWAP_REMOVAL_REASON: ShelfRemovedReason = 'wrong-product'
   // A pending version this old had its build die: it is ignored, and the next build goes on over it.
   private static readonly STALE_AFTER_MS = 15 * RoutineService.MINUTE_MS
   private static readonly WRITER_TRIES = 3
@@ -130,6 +134,7 @@ export class RoutineService {
   private readonly goals: RoutineServiceDeps['goals']
   private readonly safety: RoutineServiceDeps['safety']
   private readonly shelf: RoutineServiceDeps['shelf']
+  private readonly swaps: RoutineServiceDeps['swaps']
   private readonly catalog: RoutineServiceDeps['catalog']
   private readonly faceScans: RoutineServiceDeps['faceScans']
   private readonly workbook: RoutineServiceDeps['workbook']
@@ -152,6 +157,7 @@ export class RoutineService {
     this.goals = deps.goals
     this.safety = deps.safety
     this.shelf = deps.shelf
+    this.swaps = deps.swaps
     this.catalog = deps.catalog
     this.faceScans = deps.faceScans
     this.workbook = deps.workbook
@@ -773,19 +779,25 @@ export class RoutineService {
 
   /**
    * The step-downs of the started routine `previous` that go on though their shelf product has been removed (#259 B4), as that version had them (start date included). One goes on
-   * when it had begun, its entry was removed with no reason or `finished` (an allow-list: `stopped`, `not-mine` and any reason added later end it), and its template's last week has not
-   * passed on the person's local day: a step-down begun on day D whose last week is W runs through D + 7W - 1, as the viewer counts it, and the rebuild on D + 7W drops it. A template
-   * the workbook no longer holds ends it too (the viewer could not show it). Nothing more is read than the active shelf already in hand until a begun step-down has left it.
+   * when it had begun, its entry was removed with no reason or `finished` (an allow-list: `stopped`, `not-mine` and any reason added later end it) or as `wrong-product` (see below),
+   * and its template's last week has not passed on the person's local day: a step-down begun on day D whose last week is W runs through D + 7W - 1, as the viewer counts it, and the
+   * rebuild on D + 7W drops it. A template the workbook no longer holds ends it too (the viewer could not show it). Nothing more is read than the active shelf already in hand until a
+   * begun step-down has left it.
    *
    * A going-on step-down whose product was put back as a new entry that the rules stop on the same template is not kept for the removed entry: it CONTINUES on the new one
-   * (`continuedAs`, old entry id to new), which takes its start date, so the person is never put back at week 1 and sees the product's real name.
+   * (`continuedAs`, old entry id to new), which takes its start date, so the person is never put back at week 1 and sees the product's real name. An entry that already holds a step-down
+   * in `previous` is never continued onto (two step-downs would land on one entry).
+   *
+   * A `wrong-product` removal is a swap (#259 B5): the right product is the one named by the entry's latest wrong-match report, read only for a step-down still running, and a swap
+   * with no report ends as before. If the right product is on the shelf the step-down continues on its entry when stopped on the same template and ends otherwise; if it is not on the
+   * shelf yet (its scan takes minutes) the step-down is carried like a `finished` one and runs to its last week if the product never arrives.
    */
   private async removedTapersOf(profileId: string, previous: RoutineVersionRow | null, active: { entries: ShelfActiveEntry[]; shelf: SkeletonShelfProduct[] }, todayOf: () => Promise<Date>): Promise<RemovedTapers> {
     const onShelf = new Set(active.entries.map((entry) => entry.id))
     const gone = previous?.tapers.filter((taper) => taper.startedOn !== null && !onShelf.has(taper.shelfProductId)) ?? []
     if (gone.length === 0) return NO_REMOVED
     const reasons = new Map((await this.shelf.removedEntriesFor(profileId)).map(({ id, reason }) => [id, reason]))
-    const removed = gone.filter((taper) => reasons.has(taper.shelfProductId) && RoutineService.CARRYING_REMOVAL_REASONS.includes(reasons.get(taper.shelfProductId)!))
+    const removed = gone.filter((taper) => reasons.has(taper.shelfProductId) && [...RoutineService.CARRYING_REMOVAL_REASONS, RoutineService.SWAP_REMOVAL_REASON].includes(reasons.get(taper.shelfProductId)!))
     if (removed.length === 0) return NO_REMOVED
     const templates = await this.workbook.tapersByCode(removed.map((taper) => taper.templateId))
     const today = await todayOf()
@@ -793,18 +805,32 @@ export class RoutineService {
       const last = templates.get(taper.templateId)?.schedule.at(-1)
       return last !== undefined && today.getTime() < taper.startedOn!.getTime() + last.toWeek * RoutineService.WEEK_DAYS * RoutineService.DAY_MS
     })
+    const swapped = running.filter((taper) => reasons.get(taper.shelfProductId) === RoutineService.SWAP_REMOVAL_REASON)
+    const rightProducts = swapped.length > 0 ? await this.swaps.rightProductsFor(profileId, swapped.map((taper) => taper.shelfProductId)) : new Map<string, string>()
+    const swappedIds = new Set(swapped.map((taper) => taper.shelfProductId))
+    // A swap with no report has no right product to follow: it ends.
+    const going = running.filter((taper) => !swappedIds.has(taper.shelfProductId) || rightProducts.has(taper.shelfProductId))
     const stops = active.shelf.flatMap((product) => (product.verdict.kind === 'stop' ? [{ id: product.id, templateId: product.verdict.taperTemplateId }] : []))
-    if (!running.some((taper) => stops.some((stop) => stop.templateId === taper.templateId))) return { carriedRemoved: running, continuedAs: new Map() }
-    const productIds = await this.shelf.removedProductIdsFor(profileId, running.map((taper) => taper.shelfProductId))
-    const continuedAs = new Map<string, string>()
-    for (const taper of running) {
-      const productId = productIds.get(taper.shelfProductId)
-      const putBack = stops.find(
-        (stop) => stop.templateId === taper.templateId && ![...continuedAs.values()].includes(stop.id) && active.entries.some((entry) => entry.id === stop.id && entry.kind === 'product' && entry.productId === productId),
-      )
-      if (productId !== undefined && putBack) continuedAs.set(taper.shelfProductId, putBack.id)
+    const putBackIds = going.filter((taper) => !swappedIds.has(taper.shelfProductId))
+    const productIds = new Map(rightProducts)
+    if (putBackIds.some((taper) => stops.some((stop) => stop.templateId === taper.templateId))) {
+      for (const [entryId, productId] of await this.shelf.removedProductIdsFor(profileId, putBackIds.map((taper) => taper.shelfProductId))) productIds.set(entryId, productId)
     }
-    return { carriedRemoved: running.filter((taper) => !continuedAs.has(taper.shelfProductId)), continuedAs }
+    const hasOwn = new Set((previous?.tapers ?? []).map((taper) => taper.shelfProductId))
+    const continuedAs = new Map<string, string>()
+    const ended = new Set<string>()
+    for (const taper of going) {
+      const productId = productIds.get(taper.shelfProductId)
+      const holds = (entry: ShelfActiveEntry) => entry.kind === 'product' && entry.productId === productId
+      const putBack =
+        productId === undefined
+          ? undefined
+          : stops.find((stop) => stop.templateId === taper.templateId && !hasOwn.has(stop.id) && ![...continuedAs.values()].includes(stop.id) && active.entries.some((entry) => entry.id === stop.id && holds(entry)))
+      if (putBack) continuedAs.set(taper.shelfProductId, putBack.id)
+      // The right product is on the shelf already but does not take the step-down on (kept, another template, or its entry has its own): the swapped-out one ends.
+      else if (swappedIds.has(taper.shelfProductId) && active.entries.some(holds)) ended.add(taper.shelfProductId)
+    }
+    return { carriedRemoved: going.filter((taper) => !continuedAs.has(taper.shelfProductId) && !ended.has(taper.shelfProductId)), continuedAs }
   }
 
   /** The routine in force as the merge reads it. A row written before versions stored their goal is taken to have the current one. */
