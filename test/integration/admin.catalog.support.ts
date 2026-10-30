@@ -31,7 +31,7 @@ export const IMPORT_URL = `${ORIGIN}/api/v1/admin/catalog/import`
  * The contract version this checkout serves, written out: the version of the contract that adds reviewer_role to the Ingredients and Claim words tabs, source_url to Claim words and
  * the about-a-product escalation. A literal, not read from the code, so a bump has to be made here too.
  */
-export const CONTRACT_VERSION = '2.4.0'
+export const CONTRACT_VERSION = '2.4.1'
 
 export const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 

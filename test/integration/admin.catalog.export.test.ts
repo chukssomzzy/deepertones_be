@@ -58,7 +58,7 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
 
     expect(live.catalogVersion).toBe(1)
     expect(live.contractVersion).toBe(CONTRACT_VERSION)
-    expect(CONTRACT_VERSION).toBe('2.4.0')
+    expect(CONTRACT_VERSION).toBe('2.4.1')
     expect(await rulesVersion()).toBe(REFERENCE_VERSION)
   })
 

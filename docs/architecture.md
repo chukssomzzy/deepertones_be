@@ -1852,7 +1852,7 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   formulation could be the fallback. `flagFacts(ingredients, rules)` takes the rules as an argument, so the eval calls it with `REFERENCE`, and the facts of
   one name that has several kinds come out in a fixed order (banned first, then the commonly cited concerns), never in the order the rows were read.
 - **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: eleven tabs (Products, Availability, Ingredients,
-  Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses, Weeks; contract 2.4.0), their columns, accepted values and
+  Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses, Weeks; contract 2.4.1), their columns, accepted values and
   length caps, and `validateWorkbook(raw)`, which returns the parsed workbook or EVERY problem as `{ tab, row, column, rule }` (a fixed code, never a cell
   value). A tab is `{ headers, rows }`: the header row decides which columns exist, a key a row has that is no header is ignored, and a key it lacks is an
   empty cell. A cell is measured before it is read, so a cell over its cap says only that, and a 32767-character cell costs about its length. The module is
@@ -2980,12 +2980,14 @@ Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Rei
   1. The tabs are read in the shape the contract is written in (`RawWorkbookSchema`: all eleven tabs, each a header row and rows): 400 `VALIDATION_FAILED` with
      `{ path, message }` details under `workbook`. Only a file of the current contract version gets this far. Then `validateWorkbook` runs on the server whatever
      the script did: 400 `CATALOG_INVALID` with every problem in `error.details.problems`.
-  1a. **The production approver gate.** In `production` only (`ENVIRONMENT`), every Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row with status `approved` must have an `approved_by` that is
+  1a. **The production approver gate.** In `production` only (`ENVIRONMENT`), every Ingredients, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row with status `approved` must have an `approved_by` that is
      exactly one of the comma-separated labels in the `QUALIFIED_APPROVERS` var (each trimmed; an empty or absent var refuses every approved row of those tabs).
-     Otherwise it is 400 `CATALOG_INVALID` with one `{ tab: 'tapers' | 'guides' | 'reintroductions' | 'escalations' | 'responses' | 'weeks', row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }` for each such row, and
+     Otherwise it is 400 `CATALOG_INVALID` with one `{ tab: 'ingredients' | 'claimWords' | 'tapers' | 'guides' | 'reintroductions' | 'escalations' | 'responses' | 'weeks', row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }` for each such row, and
      the name is never echoed or logged. It is a process control, not authentication: the approver is a label in a cell, written by whoever holds the
      admin token. Staging and development accept any approver, so the owner or Claude can approve there. The service takes `environment` and
      `qualifiedApprovers` from the container; `QUALIFIED_APPROVERS` is a plain var in all three `wrangler.jsonc` blocks, empty until a qualified approver is named.
+     Ingredients and Claim words joined the gate with contract 2.4.1 (the owner, 2026-10-30), because the verdict shows their `reviewer_role` as "Reviewed by": the seed's
+     rules, signed `reference seed`, need a listed approver at the first production upload. `reviewer_role` itself is not judged; it is the listed approver's to write.
   2. `baseVersion` must be the live catalog version: 409 `CATALOG_STALE`, for a dry run too, so a stale copy is told before anyone applies it.
   3. The diff is per tab, by code (availability by `<product code>:<country>`, a guide by its step, or `<step>:<goal>` when it is for a goal): `added`, `updated`, `retired`, `reactivated`, comparing parsed values, so
      `a;b` and `a; b` are one list. **The upload is the whole catalog**: a code it leaves out is retired in place, never deleted, so its code is never
@@ -3053,12 +3055,13 @@ Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Rei
      optional https `source_url`. Both are nullable columns (`reviewer_role` on `ingredient_rules` and `claim_words`, `source_url` on `claim_words`), and a row stored
      before 2.4.0 reads them as null. **`reviewer_role` is rule metadata, not part of the rules version**, like `group` and `clashes_with`: the fingerprint still hashes
      only what the matcher reads, so a change to it moves the catalog version and re-analyses nothing. `readVerdictReference` gives them (`reviewerRole` on a rule and a
-     claim word, `sourceUrl` on a claim word); the production approver gate is unchanged and does not cover these two tabs. `ESCALATION_REASONS` gains `about-a-product`
+     claim word, `sourceUrl` on a claim word); since 2.4.1 the production approver gate covers these two tabs too (1a above). `ESCALATION_REASONS` gains `about-a-product`
      at the end: the reviewed text shown when a person taps "Talk to a professional" about a shelf product, and, like every reason, it needs its one approved row
      (`ESCALATION_MISSING`) and passes the wording gate.
      **After the 2.4.0 deploy, re-export the staging catalog sheet, fill `reviewer_role` on every approved Ingredients and Claim words row, and add the approved
      `about-a-product` Escalations row before its next import**: an unedited export is refused until then, and a 2.3.0 file is refused as `409 CONTRACT_MISMATCH`.
-     The same goes for a saved eval snapshot workbook.
+     The same goes for a saved eval snapshot workbook. 2.4.1 changed only the words of `UNQUALIFIED_APPROVER` (it names the two tabs the gate now covers): a 2.4.0 file is
+     refused as `409 CONTRACT_MISMATCH`, so export again; no column or value moved.
   4. **The join is exact.** A Products row finds its catalog product by identity key, then by alias; otherwise it is a new product (listed in
      `newProducts`, which a dry run shows too). There is **no near-miss search and no model call**, so an import makes no outbound request; a different
      spelling of a product the catalog knows becomes a second product, which the diff makes visible. The workbook's list is stored as a formulation of

@@ -1,6 +1,6 @@
 # Catalog workbook contract
 
-Version 2.4.0. Fingerprint `eb5d5d1bd931dc2f4f21f1bed12e60c81e3905a01155a56b2ee504660dda3005`.
+Version 2.4.1. Fingerprint `2d99c296efb349b25d13b010f04a4907d5d3b64e661cd93a9f766da5bd08314c`.
 
 This document is written by `npm run catalog:contract-doc` from `src/modules/catalog/catalog.workbook.schema.ts`. Do not edit it by hand: change the
 contract, and run the command again.
@@ -503,7 +503,7 @@ Used by: `Weeks.step_down`
 | `SCHEDULE_MISSING_STOP` | The schedule never says stop. A step-down ends with a step whose frequency is stop. |
 | `SCHEDULE_STOP_NOT_LAST` | A step whose frequency is stop is followed by another step. Stop ends the schedule, so it is the last step. |
 | `SCHEDULE_FREQUENCY_INCREASES` | A step uses the product more often than the step before it. A step-down only ever goes down: am-pm, then am or pm, then alternate-days, then weekly, then as-needed, then stop. |
-| `UNQUALIFIED_APPROVER` | In production only: a Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. What these tabs hold is shown to people, so a qualified person has to approve it. It is raised by the server, not by the contract check on the file. |
+| `UNQUALIFIED_APPROVER` | In production only: an Ingredients, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. What these tabs hold is shown to people (a rule or claim word with its reviewer role, as "Reviewed by"), so a qualified person has to approve it. It is raised by the server, not by the contract check on the file. |
 | `GUIDE_BASE_MISSING` | A routine step has no approved guide without a goal. Each of the four steps (cleanse, treat, moisturise, protect) needs one approved row with the goal column empty: it is what a person sees when no row is written for their goal. A draft or retired row does not count. It is reported once, on the header row of the Guides tab. |
 | `GUIDE_DUPLICATE` | Two rows of the Guides tab are for the same step and goal (or the same step with no goal). Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each. |
 | `GUIDE_WORDING` | A guide text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. The same words are refused in every part of the routine. Say what the product does for the skin in plain words, without them. |

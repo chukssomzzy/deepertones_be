@@ -34,7 +34,7 @@ export const RawWorkbookSchema = z
 export const ExportCatalogResponse = z
   .object({
     catalogVersion: z.number().int().openapi({ description: 'The live catalog version: send it back as `baseVersion` when importing the edited workbook.' }),
-    contractVersion: z.string().openapi({ example: '2.4.0', description: 'The contract version of the workbook: send it back as `contractVersion` when importing the edited workbook.' }),
+    contractVersion: z.string().openapi({ example: '2.4.1', description: 'The contract version of the workbook: send it back as `contractVersion` when importing the edited workbook.' }),
     workbook: RawWorkbookSchema,
   })
   .openapi('CatalogExport')
@@ -63,7 +63,7 @@ export const ImportCatalogBody = z.object({
     .default('true')
     .transform((value) => value === 'true')
     .openapi({ type: 'string', enum: ['true', 'false'], default: 'true', description: 'Only `false` applies the upload. The default reports what it would change and writes nothing.' }),
-  contractVersion: z.string().min(1).max(MAX_CONTRACT_VERSION).openapi({ description: 'The `contractVersion` of the export the workbook was edited from. A workbook made for another contract version is refused with 409 `CONTRACT_MISMATCH`, before anything else is checked.', example: '2.4.0' }),
+  contractVersion: z.string().min(1).max(MAX_CONTRACT_VERSION).openapi({ description: 'The `contractVersion` of the export the workbook was edited from. A workbook made for another contract version is refused with 409 `CONTRACT_MISMATCH`, before anything else is checked.', example: '2.4.1' }),
   uploadedBy: z.string().trim().min(1).max(MAX_UPLOADED_BY).openapi({ description: 'Who is uploading, as a label for the catalog version (1 to 80 characters, after trimming).' }),
 })
 

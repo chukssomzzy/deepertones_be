@@ -42,7 +42,7 @@ import {
 // The HTTP shapes that carry a workbook (the raw tabs a request and the export hold) are zod schemas in catalog.workbook.schemas.ts; a tab or cell type changed here changes those too.
 
 /** Bumped when a tab, column, accepted value or rule changes, so a file written to an older contract is known to be. */
-export const CONTRACT_VERSION = '2.4.0'
+export const CONTRACT_VERSION = '2.4.1'
 
 /** What a spreadsheet library gives for a cell. */
 export type Cell = string | number | boolean | null
@@ -117,7 +117,7 @@ const RULES = {
   SCHEDULE_STOP_NOT_LAST: 'A step whose frequency is stop is followed by another step. Stop ends the schedule, so it is the last step.',
   SCHEDULE_FREQUENCY_INCREASES: 'A step uses the product more often than the step before it. A step-down only ever goes down: am-pm, then am or pm, then alternate-days, then weekly, then as-needed, then stop.',
   UNQUALIFIED_APPROVER:
-    'In production only: a Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. What these tabs hold is shown to people, so a qualified person has to approve it. It is raised by the server, not by the contract check on the file.',
+    'In production only: an Ingredients, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. What these tabs hold is shown to people (a rule or claim word with its reviewer role, as "Reviewed by"), so a qualified person has to approve it. It is raised by the server, not by the contract check on the file.',
   GUIDE_BASE_MISSING:
     'A routine step has no approved guide without a goal. Each of the four steps (cleanse, treat, moisturise, protect) needs one approved row with the goal column empty: it is what a person sees when no row is written for their goal. A draft or retired row does not count. It is reported once, on the header row of the Guides tab.',
   GUIDE_DUPLICATE: 'Two rows of the Guides tab are for the same step and goal (or the same step with no goal). Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each.',
