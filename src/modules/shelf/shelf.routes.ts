@@ -4,7 +4,7 @@ import { ProductSummary } from '../scans/scans.schemas'
 import { FALLBACK_IP, rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { toEntryResponse, toShelfResponse } from './shelf.presenter'
-import { AddShelfProductBody, AddShelfProductResponse, EntryParams, RemoveShelfEntryBody, ReplaceShelfEntryBody, ShelfEntryResponse, ShelfResponse } from './shelf.schemas'
+import { AddShelfProductBody, AddShelfProductResponse, EntryParams, RemoveShelfEntriesBody, RemoveShelfEntriesResponse, RemoveShelfEntryBody, ReplaceShelfEntryBody, ShelfEntryResponse, ShelfResponse } from './shelf.schemas'
 
 const bearer = [{ bearerAuth: [] }]
 
@@ -98,11 +98,32 @@ const removeShelfEntry = defineRoute({
   responses: { 204: { description: 'The entry is off the shelf' }, ...errorResponses(400, 401, 404) },
 })
 
+const removeShelfEntries = defineRoute({
+  method: 'post',
+  path: '/shelf/remove',
+  operationId: 'removeShelfEntries',
+  tags: ['Shelf'],
+  summary: 'Take several products off the shelf at once',
+  description:
+    'Guests included. Body `{ entryIds, reason? }`: 1 to 50 different entry ids (a repeated id is 400) and, for all of them, one of `finished`, `stopped` or `not-mine`. ' +
+    'All or nothing: if any id is unknown, another profile\'s or never existed (not told apart) the answer is 404 `SHELF_ENTRY_NOT_FOUND` and nothing changes. ' +
+    'An entry removed before is accepted and keeps its first reason and time. 200 `{ removed, stepDownWarnings }`: `removed` holds the ids this call took off, in the order asked for; ' +
+    '`stepDownWarnings` holds those of them that the verdict `GET /api/v1/me/verdict` would serve now says to stop, each with a fixed `line` to show (a steroid or lightening product is stepped down, not stopped suddenly) and, for a verified user, the `taperCode` of its step-down, ' +
+    'in the order asked for; the app shows that taper\'s `whatToExpect` and `seeAProfessionalIf` from the verdict. A guest is served only the locked verdict preview, so their `taperCode` is `null` and the `line` stands on its own. It is empty when the verdict is pending, out of date or unavailable: ' +
+    'the removal never fails because the verdict cannot be read.',
+  security: bearer,
+  // Before the body is read, so an unsigned caller is 401 whatever it sent, as for the add.
+  middleware: [signedIn()],
+  request: { body: jsonBody(RemoveShelfEntriesBody) },
+  responses: { 200: success(RemoveShelfEntriesResponse, 'What was taken off, and the step-down warnings'), ...errorResponses(400, 401, 404) },
+})
+
 // The documented routes above carry their JSON bodies for the spec. They are served from copies without them: @hono/zod-openapi
 // reports a malformed JSON body as HTTP_400 rather than VALIDATION_FAILED, and validates JSON whenever the Content-Type says JSON, so an
 // empty body then fails as malformed. The remove route must also let a client that always sends the header remove with no reason.
 const removeShelfEntryServed = { ...removeShelfEntry, request: { params: EntryParams }, hide: true }
 const addShelfProductServed = { ...addShelfProduct, request: {}, hide: true }
+const removeShelfEntriesServed = { ...removeShelfEntries, request: {}, hide: true }
 const replaceShelfEntryServed = { ...replaceShelfEntry, request: { params: EntryParams }, hide: true }
 
 /** No text, or only whitespace, is no reason; anything else must be a valid RemoveShelfEntryBody. */
@@ -124,6 +145,10 @@ export const shelfRoutes = shelfApp
     if (added.status === 'exists') return ok(c, toEntryResponse(added.entry), 'Already on the shelf', 200)
     return ok(c, { scanId: added.scanId, itemId: added.itemId }, 'Scan started', 202)
   })
+  .openapi(removeShelfEntriesServed, async (c) => {
+    const { entryIds, reason } = readJsonBody(await c.req.text(), RemoveShelfEntriesBody)
+    return ok(c, await c.var.services.shelf.removeMany(entryIds, reason), 'Shelf entries removed')
+  })
   .openapi(replaceShelfEntryServed, async (c) => {
     const { productId } = readJsonBody(await c.req.text(), ReplaceShelfEntryBody)
     const added = await c.var.services.shelf.replace(c.req.valid('param').entryId, productId, c.req.header('cf-connecting-ip') ?? FALLBACK_IP)
@@ -136,7 +161,8 @@ export const shelfRoutes = shelfApp
     return c.body(null, 204)
   })
 
-// What these three routes document, registered by hand because they are served by their body-less copies.
+// What these routes document, registered by hand because they are served by their body-less copies.
 shelfRoutes.openAPIRegistry.registerPath(documentedOnly(addShelfProduct))
+shelfRoutes.openAPIRegistry.registerPath(documentedOnly(removeShelfEntries))
 shelfRoutes.openAPIRegistry.registerPath(documentedOnly(replaceShelfEntry))
 shelfRoutes.openAPIRegistry.registerPath(documentedOnly(removeShelfEntry))

@@ -3,6 +3,7 @@ import { type Actor, runAs } from '../../lib/context'
 import { NotFoundError, RateLimitedError } from '../../lib/errors'
 import type { ProductSummary } from '../catalog/catalog.service'
 import type { ScanItemView } from '../scans/scans.service'
+import { STEP_DOWN_LINE_GUEST, STEP_DOWN_LINE_VERIFIED } from './shelf.copy'
 import { FakeOpsAlertsRepository } from '../ops-alerts/ops-alerts.repository.fake'
 import { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { MemoryEmailSender } from '../../providers/email/memory.email'
@@ -26,9 +27,10 @@ const errorOf = async (promise: Promise<unknown>) => {
   throw new Error('expected the promise to reject')
 }
 
-const actor = (userId: string, profileId: string): Extract<Actor, { kind: 'user' }> => ({ kind: 'user', userId, status: 'anonymous', profileId })
+const actor = (userId: string, profileId: string, status: 'anonymous' | 'verified' = 'anonymous'): Extract<Actor, { kind: 'user' }> => ({ kind: 'user', userId, status, profileId })
 const AMARA = actor('user-amara', 'profile-amara')
 const TOLU = actor('user-tolu', 'profile-tolu')
+const NGOZI = actor('user-ngozi', 'profile-ngozi', 'verified')
 
 type NoLabelView = NonNullable<ScanItemView['noLabel']>
 
@@ -47,6 +49,13 @@ let store: FakeShelfStore
 let known: Set<string>
 let summaryCalls: string[][]
 let noLabelCalls: string[][]
+// The narrow dependency that tells the shelf which products the person's current verdict stops: `stopsFor(profileId)` answers a Map of shelf
+// entry id -> step-down code. The shelf module cannot import verdicts, so this is all it knows of them; container.ts wires it to the verdicts service.
+let stops: Map<string, string>
+let stopsAskedFor: string[]
+// Which of the entries were still on the shelf at the moment the verdict was read: it must be read BEFORE the removal, which changes its inputs.
+let activeWhenRead: string[]
+let stopsFailure: Error | null
 let service: ShelfService
 // What the swap hands its dependencies, recorded in order across all of them, so a test can say what happened before what.
 let calls: string[]
@@ -84,12 +93,17 @@ const put = (profileId: string, n: number, over: Partial<ShelfEntryRow> = {}): S
 const list = (who: Actor) => runAs(who, () => service.list())
 const entry = (who: Actor, entryId: string) => runAs(who, () => service.entry(entryId))
 const remove = (who: Actor, entryId: string, reason?: 'finished' | 'stopped' | 'not-mine') => runAs(who, () => service.remove(entryId, reason))
+const removeMany = (who: Actor, entryIds: string[], reason?: 'finished' | 'stopped' | 'not-mine') => runAs(who, () => service.removeMany(entryIds, reason))
 
 beforeEach(() => {
   store = new FakeShelfStore()
   known = new Set()
   summaryCalls = []
   noLabelCalls = []
+  stops = new Map()
+  stopsAskedFor = []
+  activeWhenRead = []
+  stopsFailure = null
   calls = []
   reports = []
   raised = []
@@ -136,6 +150,14 @@ beforeEach(() => {
       raise: async (kind) => {
         calls.push('raise')
         raised.push(kind)
+      },
+    },
+    stepDowns: {
+      stopsFor: async (profileId: string) => {
+        stopsAskedFor.push(profileId)
+        activeWhenRead = store.rows.filter((row) => row.removedAt === null).map((row) => row.id)
+        if (stopsFailure) throw stopsFailure
+        return new Map(stops)
       },
     },
     now: () => at(100 * MINUTE),
@@ -500,6 +522,155 @@ describe('ShelfService.remove', () => {
   })
 })
 
+// Taking several products off at once (spec #259, B2): all or nothing, and the step-down warning for any removed product the person's current verdict stops.
+describe('ShelfService.removeMany', () => {
+  it('takes every entry off the shelf with the reason and the time, and answers the ids it removed in the order they were asked for', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2)
+    put(AMARA.profileId, 3)
+    put(AMARA.profileId, 4)
+
+    const result = await removeMany(AMARA, ['entry-3', 'entry-1', 'entry-2'], 'finished')
+
+    expect(result.removed).toEqual(['entry-3', 'entry-1', 'entry-2'])
+    expect((await list(AMARA)).entries.map((e) => e.id)).toEqual(['entry-4'])
+    for (const id of ['entry-1', 'entry-2', 'entry-3']) {
+      const row = store.rows.find((r) => r.id === id)!
+      expect(row.removedReason).toBe('finished')
+      expect(row.removedAt!.getTime()).toBe(at(100 * MINUTE).getTime())
+    }
+    expect(store.rows.find((r) => r.id === 'entry-4')).toMatchObject({ removedAt: null, removedReason: null })
+  })
+
+  it('removes with no reason when none is given', async () => {
+    put(AMARA.profileId, 1)
+
+    await removeMany(AMARA, ['entry-1'])
+
+    expect(store.rows[0]).toMatchObject({ removedReason: null })
+    expect(store.rows[0]!.removedAt).not.toBeNull()
+  })
+
+  it('refuses with SHELF_ENTRY_NOT_FOUND and removes nothing when one id among good ones is unknown', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2)
+
+    expect((await errorOf(removeMany(AMARA, ['entry-1', 'entry-nobody', 'entry-2'], 'stopped'))).code).toBe('SHELF_ENTRY_NOT_FOUND')
+
+    expect(store.rows.map((r) => [r.id, r.removedAt, r.removedReason])).toEqual([['entry-1', null, null], ['entry-2', null, null]])
+  })
+
+  it('refuses with SHELF_ENTRY_NOT_FOUND and removes nothing when one id is another profile\'s, which is left on its own shelf', async () => {
+    put(AMARA.profileId, 1)
+    put(TOLU.profileId, 2)
+
+    expect((await errorOf(removeMany(AMARA, ['entry-1', 'entry-2'], 'not-mine'))).code).toBe('SHELF_ENTRY_NOT_FOUND')
+
+    expect(store.rows.map((r) => [r.id, r.removedAt, r.removedReason])).toEqual([['entry-1', null, null], ['entry-2', null, null]])
+  })
+
+  it('accepts an entry removed before without counting it as removed now, and keeps its first reason and time', async () => {
+    put(AMARA.profileId, 1, { removedAt: at(5 * MINUTE), removedReason: 'finished' })
+    put(AMARA.profileId, 2)
+
+    const result = await removeMany(AMARA, ['entry-1', 'entry-2'], 'stopped')
+
+    expect(result.removed).toEqual(['entry-2'])
+    expect(store.rows[0]).toMatchObject({ removedReason: 'finished' })
+    expect(store.rows[0]!.removedAt!.getTime()).toBe(at(5 * MINUTE).getTime())
+    expect(store.rows[1]).toMatchObject({ removedReason: 'stopped' })
+  })
+
+  it('warns a verified caller, with the step-down code and the verified line, for each entry removed now that the current verdict stops, in the order they were asked for', async () => {
+    put(NGOZI.profileId, 1)
+    put(NGOZI.profileId, 2)
+    put(NGOZI.profileId, 3)
+    stops = new Map([['entry-1', 'TPR-STEROID'], ['entry-3', 'TPR-LIGHTENING']])
+
+    const result = await removeMany(NGOZI, ['entry-3', 'entry-2', 'entry-1'])
+
+    expect(result.removed).toEqual(['entry-3', 'entry-2', 'entry-1'])
+    expect(result.stepDownWarnings).toEqual([
+      { entryId: 'entry-3', taperCode: 'TPR-LIGHTENING', line: STEP_DOWN_LINE_VERIFIED },
+      { entryId: 'entry-1', taperCode: 'TPR-STEROID', line: STEP_DOWN_LINE_VERIFIED },
+    ])
+  })
+
+  it('warns a guest too, with no taper code and the guest line, in the order they were asked for, and nothing else of the verdict', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2)
+    put(AMARA.profileId, 3)
+    stops = new Map([['entry-1', 'TPR-STEROID'], ['entry-3', 'TPR-LIGHTENING']])
+
+    const result = await removeMany(AMARA, ['entry-3', 'entry-2', 'entry-1'])
+
+    expect(result.removed).toEqual(['entry-3', 'entry-2', 'entry-1'])
+    expect(result.stepDownWarnings).toEqual([
+      { entryId: 'entry-3', taperCode: null, line: STEP_DOWN_LINE_GUEST },
+      { entryId: 'entry-1', taperCode: null, line: STEP_DOWN_LINE_GUEST },
+    ])
+    expect(JSON.stringify(result)).not.toContain('TPR-')
+  })
+
+  it('gives no warning when the verdict stops nothing among the entries removed, or nothing at all', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2)
+
+    expect((await removeMany(AMARA, ['entry-1'])).stepDownWarnings).toEqual([])
+
+    // A stopped product that stays on the shelf is not a warning for the ones that go.
+    stops = new Map([['entry-9', 'TPR-STEROID']])
+    expect((await removeMany(AMARA, ['entry-2'])).stepDownWarnings).toEqual([])
+  })
+
+  it('does not warn about an entry that was removed before, though the verdict stops it', async () => {
+    put(AMARA.profileId, 1, { removedAt: at(5 * MINUTE), removedReason: 'finished' })
+    put(AMARA.profileId, 2)
+    stops = new Map([['entry-1', 'TPR-STEROID'], ['entry-2', 'TPR-STEROID']])
+
+    const result = await removeMany(AMARA, ['entry-1', 'entry-2'])
+
+    expect(result.stepDownWarnings).toEqual([{ entryId: 'entry-2', taperCode: null, line: STEP_DOWN_LINE_GUEST }])
+  })
+
+  it('reads the verdict for the caller\'s own profile, and before the removal, whose change of the shelf would change the verdict', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2)
+    put(TOLU.profileId, 3)
+
+    await removeMany(AMARA, ['entry-1'])
+
+    expect(stopsAskedFor).toEqual([AMARA.profileId])
+    expect(activeWhenRead).toContain('entry-1')
+  })
+
+  it('still removes, with no warnings, when the verdict cannot be read, logging ids and no error text', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2)
+    stopsFailure = new Error('verdict store exploded for Glow Co Serum')
+
+    const result = await removeMany(AMARA, ['entry-1', 'entry-2'], 'stopped')
+
+    expect(result).toEqual({ removed: ['entry-1', 'entry-2'], stepDownWarnings: [] })
+    expect(store.rows.map((r) => r.removedReason)).toEqual(['stopped', 'stopped'])
+    expect(error).toHaveBeenCalled()
+    const logged = error.mock.calls.flat()
+    expect(logged.some((arg) => arg instanceof Error)).toBe(false)
+    expect(JSON.stringify(logged)).not.toContain('Glow Co')
+  })
+
+  it('does not hide a failed removal behind the verdict: an unknown id is still SHELF_ENTRY_NOT_FOUND when the verdict cannot be read', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    put(AMARA.profileId, 1)
+    stopsFailure = new Error('down')
+
+    expect((await errorOf(removeMany(AMARA, ['entry-1', 'entry-nobody']))).code).toBe('SHELF_ENTRY_NOT_FOUND')
+
+    expect(store.rows[0]).toMatchObject({ removedAt: null })
+  })
+})
+
 // --- "This isn't the right product" (spec #259, B3): ShelfService.replace(entryId, productId, clientIp) ---
 //
 // Checks, in order: 404 SHELF_ENTRY_NOT_FOUND (unknown, another profile's or already removed), 400 VALIDATION_FAILED (the product is the entry's own), 404 PRODUCT_NOT_FOUND
@@ -560,6 +731,7 @@ describe('ShelfService.replace', () => {
       scans: { noLabelViews: async () => new Map(), createTyped: async () => ({ scanId: 'scan-typed', itemId: 'item-typed' }) },
       wrongMatches: { record: async () => {} },
       opsAlerts,
+      stepDowns: { stopsFor: async () => new Map() },
       now: () => at(100 * MINUTE),
     })
     put(AMARA.profileId, 1)
@@ -718,6 +890,7 @@ describe('ShelfService.replace', () => {
       },
       wrongMatches: { record: async (report, now) => void reports.push({ report, now }) },
       opsAlerts: { raise: async (kind) => void raised.push(kind) },
+      stepDowns: { stopsFor: async () => new Map() },
       now: () => at(100 * MINUTE),
     })
     put(AMARA.profileId, 1)

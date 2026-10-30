@@ -368,6 +368,14 @@ export const buildContainer = (env: CloudflareBindings) => {
         repository: new D1ShelfRepository(db()),
         catalog: catalog(),
         scans: scans(),
+        // The verdict as it would be served now (null while pending, out of date or unavailable): its stopped products by entry, with the code of the step-down each is shown
+        // with (`taperTemplateId`, the `code` of `tapers[]` in GET /me/verdict). The verdict is built on the shelf, so it is asked through here, not imported by the shelf module.
+        stepDowns: {
+          stopsFor: async (profileId): Promise<Map<string, string>> => {
+            const saved = await verdicts().savedFor(profileId)
+            return new Map((saved?.products ?? []).flatMap(({ entryId, verdict }) => (verdict.kind === 'stop' ? [[entryId, verdict.taperTemplateId] as const] : [])))
+          },
+        },
         // Structural, so shelf does not import verdicts: the swap's report goes to the verdicts' report table.
         wrongMatches: { record: (report, now) => verdictReportsRepository().recordWrongMatch(report, now) },
         opsAlerts: opsAlerts(),

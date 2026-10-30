@@ -1,11 +1,18 @@
 import { and, asc, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm'
-import { queryByIds, type Db } from '../../lib/db'
+import type { BatchItem } from 'drizzle-orm/batch'
+import { chunked, queryByIds, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { profileProducts } from './shelf.table'
 import type { ShelfEntryRow, ShelfRemovedReason } from './shelf.types'
 
 /** What `remove` found: the profile's active row (now removed), its row already removed (left as it was), or no such row for the profile. */
 export type ShelfRemoveResult = 'removed' | 'already-removed' | 'not-found'
+
+/**
+ * What `removeMany` came to: every entry named is now removed, `removedIds` being the ones this call removed (an entry removed before is not among them, and the order
+ * is the database's); or `not-found`, when any id is unknown or another profile's, and then nothing has changed.
+ */
+export type ShelfRemoveManyResult = { status: 'removed'; removedIds: string[] } | { status: 'not-found' }
 
 export class D1ShelfRepository {
   constructor(private readonly db: Db) {}
@@ -67,6 +74,31 @@ export class D1ShelfRepository {
       .from(profileProducts)
       .where(and(eq(profileProducts.id, entryId), eq(profileProducts.profileId, profileId)))
     return existing ? 'already-removed' : 'not-found'
+  }
+
+  /**
+   * Soft-removes these entries of the profile together, or none of them. Any id that is unknown or another profile's (not told apart) answers `not-found` and writes
+   * nothing; an entry of the profile's removed before is accepted, left as it was and not counted. The ids are checked first and the removal is then ONE `db.batch`, so
+   * it is atomic; each update still only touches an active row, so a removal racing this one cannot overwrite the first one's time and reason.
+   */
+  async removeMany(profileId: string, entryIds: string[], reason: ShelfRemovedReason | null, at: Date): Promise<ShelfRemoveManyResult> {
+    const asked = [...new Set(entryIds)]
+    const own = await queryByIds(asked, (chunk) =>
+      this.db
+        .select({ id: profileProducts.id })
+        .from(profileProducts)
+        .where(and(eq(profileProducts.profileId, profileId), inArray(profileProducts.id, chunk))),
+    )
+    if (own.length !== asked.length) return { status: 'not-found' }
+    const statements: BatchItem<'sqlite'>[] = chunked(asked).map((chunk) =>
+      this.db
+        .update(profileProducts)
+        .set({ removedAt: at, removedReason: reason })
+        .where(and(eq(profileProducts.profileId, profileId), inArray(profileProducts.id, chunk), isNull(profileProducts.removedAt)))
+        .returning({ id: profileProducts.id }),
+    )
+    const answers = await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+    return { status: 'removed', removedIds: (answers as { id: string }[][]).flatMap((rows) => rows.map((row) => row.id)) }
   }
 }
 

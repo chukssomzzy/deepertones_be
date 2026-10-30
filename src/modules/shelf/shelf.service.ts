@@ -3,8 +3,9 @@ import { NotFoundError, ValidationError } from '../../lib/errors'
 import type { ProductCatalogService, ProductSummary } from '../catalog/catalog.service'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import type { NoLabelView, ScanService } from '../scans/scans.service'
+import { STEP_DOWN_LINE_GUEST, STEP_DOWN_LINE_VERIFIED } from './shelf.copy'
 import type { ShelfRepository } from './shelf.repository'
-import type { ShelfEntryRow, ShelfPublicRemovedReason } from './shelf.types'
+import type { ShelfEntryRow, ShelfPublicRemovedReason, ShelfRemovedReason } from './shelf.types'
 
 export type ShelfPolicy = {
   /** The most entries a read returns, the most recently scanned. */
@@ -37,11 +38,26 @@ export type ShelfRemovedEntry = { id: string; reason: ShelfRemovedReason | null 
 /** What adding a product came to: it was already on the shelf (this is its entry), or a typed scan was started and the entry follows when its item is ready. */
 export type ShelfAddResult = { status: 'exists'; entry: ShelfEntryView } | { status: 'started'; scanId: string; itemId: string }
 
+/**
+ * One removed product that the person's verdict stops. A verified caller gets the step-down's public `taperCode`; a guest, who is served only the locked verdict preview,
+ * gets `null` and a line that stands on its own. `line` is fixed copy, nothing else of the verdict.
+ */
+export type ShelfStepDownWarning = { entryId: string; taperCode: string | null; line: string }
+
+/** What taking several entries off came to: the ids this call removed, and the warnings for the removed products the person's verdict stops, both in the order asked for. */
+export type ShelfRemoveManyView = { removed: string[]; stepDownWarnings: ShelfStepDownWarning[] }
+
+/** The one thing the shelf needs to know of the verdict, which it cannot import: which entries it stops, by entry id, with the step-down code each is to be eased off with. */
+export type ShelfStepDowns = {
+  stopsFor(profileId: string): Promise<Map<string, string>>
+}
+
 export type ShelfServiceDeps = {
   repository: ShelfRepository
   /** Asked through its service, never through its repository. */
   catalog: Pick<ProductCatalogService, 'productSummaries' | 'namedProduct'>
   scans: Pick<ScanService, 'noLabelViews' | 'createTyped'>
+  stepDowns: ShelfStepDowns
   /** Where the swap records its wrong-match report: the verdicts' report repository, wired in the container so shelf does not import verdicts. */
   wrongMatches: { record(report: { id: string; profileId: string; entryId: string; oldProductId: string | null; newProductId: string }, now: Date): Promise<void> }
   opsAlerts: Pick<OpsAlertsService, 'raise'>
@@ -56,6 +72,7 @@ export class ShelfService {
   private readonly repository: ShelfRepository
   private readonly catalog: Pick<ProductCatalogService, 'productSummaries' | 'namedProduct'>
   private readonly scans: Pick<ScanService, 'noLabelViews' | 'createTyped'>
+  private readonly stepDowns: ShelfStepDowns
   private readonly wrongMatches: ShelfServiceDeps['wrongMatches']
   private readonly opsAlerts: Pick<OpsAlertsService, 'raise'>
   private readonly now: () => Date
@@ -64,6 +81,7 @@ export class ShelfService {
     this.repository = deps.repository
     this.catalog = deps.catalog
     this.scans = deps.scans
+    this.stepDowns = deps.stepDowns
     this.wrongMatches = deps.wrongMatches
     this.opsAlerts = deps.opsAlerts
     this.now = deps.now ?? (() => new Date())
@@ -212,5 +230,33 @@ export class ShelfService {
     const { profileId } = requireUser()
     const result = await this.repository.remove(profileId, entryId, reason ?? null, this.now())
     if (result === 'not-found') throw new NotFoundError('SHELF_ENTRY_NOT_FOUND', 'Shelf entry not found')
+  }
+
+  /**
+   * Takes several of the caller's entries off the shelf together, all or nothing, with the reason if they gave one: an id that is unknown or another profile's (not told
+   * apart) is 404 `SHELF_ENTRY_NOT_FOUND` and nothing changes. An entry removed before is accepted, keeps its first time and reason, and is neither in `removed` nor warned about.
+   * The warnings are the removed entries the caller's current verdict stops, read BEFORE the removal, which changes the verdict's inputs. A verdict that cannot be read
+   * is no reason to refuse: the removal is made with no warnings, and only the ids are logged. A guest is warned too, but with no taper code and a self-contained line,
+   * since the guest is served only the locked verdict preview (see `ShelfStepDownWarning`).
+   */
+  async removeMany(entryIds: string[], reason?: ShelfPublicRemovedReason): Promise<ShelfRemoveManyView> {
+    const { profileId, status } = requireUser()
+    let stops = new Map<string, string>()
+    try {
+      stops = await this.stepDowns.stopsFor(profileId)
+    } catch {
+      console.error({ outcome: 'shelf-step-down-lookup-failed', profileId, entryIds })
+    }
+    const result = await this.repository.removeMany(profileId, entryIds, reason ?? null, this.now())
+    if (result.status === 'not-found') throw new NotFoundError('SHELF_ENTRY_NOT_FOUND', 'Shelf entry not found')
+    const gone = new Set(result.removedIds)
+    const removed = entryIds.filter((id) => gone.has(id))
+    const verified = status === 'verified'
+    const stepDownWarnings = removed.flatMap((entryId): ShelfStepDownWarning[] => {
+      const taperCode = stops.get(entryId)
+      if (taperCode === undefined) return []
+      return [verified ? { entryId, taperCode, line: STEP_DOWN_LINE_VERIFIED } : { entryId, taperCode: null, line: STEP_DOWN_LINE_GUEST }]
+    })
+    return { removed, stepDownWarnings }
   }
 }

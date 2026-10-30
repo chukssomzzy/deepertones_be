@@ -1052,6 +1052,79 @@
         ],
         "additionalProperties": false
       },
+      "RemoveShelfEntriesResult": {
+        "type": "object",
+        "properties": {
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The ids this call took off the shelf, in the order asked for. An id removed before is accepted but not listed."
+          },
+          "stepDownWarnings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "entryId": {
+                  "type": "string",
+                  "description": "A removed entry whose product the current verdict says to stop."
+                },
+                "taperCode": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "For a verified user, the step-down to ease off it with: the `code` of an entry of `tapers` in `GET /api/v1/me/verdict`, which carries `whatToExpect` and `seeAProfessionalIf`. `null` for a guest, who is served only the locked verdict preview."
+                },
+                "line": {
+                  "type": "string",
+                  "description": "A fixed plain-words warning to show, which stands on its own: for a guest it points at signing up to see the step-down."
+                }
+              },
+              "required": [
+                "entryId",
+                "taperCode",
+                "line"
+              ]
+            },
+            "description": "In the order asked for. Empty when the verdict is pending, out of date or unavailable, or stops none of the removed products."
+          }
+        },
+        "required": [
+          "removed",
+          "stepDownWarnings"
+        ]
+      },
+      "RemoveShelfEntriesBody": {
+        "type": "object",
+        "properties": {
+          "entryIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "The shelf entries to take off, 1 to 50 different ids, from `GET /api/v1/me/shelf`."
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "finished",
+              "stopped",
+              "not-mine"
+            ],
+            "description": "Why the products left the shelf, for all of them. Leave it out when the user did not say."
+          }
+        },
+        "required": [
+          "entryIds"
+        ],
+        "additionalProperties": false
+      },
       "ReplaceShelfEntryBody": {
         "type": "object",
         "properties": {
@@ -7805,6 +7878,109 @@
         "responses": {
           "204": {
             "description": "The entry is off the shelf"
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/shelf/remove": {
+      "post": {
+        "operationId": "removeShelfEntries",
+        "tags": [
+          "Shelf"
+        ],
+        "summary": "Take several products off the shelf at once",
+        "description": "Guests included. Body `{ entryIds, reason? }`: 1 to 50 different entry ids (a repeated id is 400) and, for all of them, one of `finished`, `stopped` or `not-mine`. All or nothing: if any id is unknown, another profile's or never existed (not told apart) the answer is 404 `SHELF_ENTRY_NOT_FOUND` and nothing changes. An entry removed before is accepted and keeps its first reason and time. 200 `{ removed, stepDownWarnings }`: `removed` holds the ids this call took off, in the order asked for; `stepDownWarnings` holds those of them that the verdict `GET /api/v1/me/verdict` would serve now says to stop, each with a fixed `line` to show (a steroid or lightening product is stepped down, not stopped suddenly) and, for a verified user, the `taperCode` of its step-down, in the order asked for; the app shows that taper's `whatToExpect` and `seeAProfessionalIf` from the verdict. A guest is served only the locked verdict preview, so their `taperCode` is `null` and the `line` stands on its own. It is empty when the verdict is pending, out of date or unavailable: the removal never fails because the verdict cannot be read.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveShelfEntriesBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What was taken off, and the step-down warnings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/RemoveShelfEntriesResult"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
           },
           "400": {
             "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",

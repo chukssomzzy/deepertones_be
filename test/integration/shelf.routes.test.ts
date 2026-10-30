@@ -1373,7 +1373,18 @@ describe('the removed reason wrong-product on the public removals', () => {
     expect(await rowOf(entry.id)).toMatchObject({ removedAt: null, removedReason: null })
   })
 
-  // Not written live: POST /api/v1/me/shelf/remove is B2's (shelf/b2-bulk-remove), which this branch (stacked on B1b) does not contain, so a test here would fail with a 404
-  // for the wrong reason. When B3 is rebased onto B2: body { entryIds: [entry.id], reason: 'wrong-product' } -> 400 VALIDATION_FAILED, entry still on the shelf, no reason written.
-  it.todo('is refused by POST /api/v1/me/shelf/remove (bulk) with 400 VALIDATION_FAILED, and the entry stays on the shelf')
+  it('is refused by POST /api/v1/me/shelf/remove (bulk) with 400 VALIDATION_FAILED, and the entry stays on the shelf', async () => {
+    const { guest, entry } = await guestWithWrongProduct()
+
+    const res = await fetchWorker('http://deepertones.test/api/v1/me/shelf/remove', {
+      method: 'POST',
+      headers: { ...guest.headers(), 'content-type': 'application/json' },
+      body: JSON.stringify({ entryIds: [entry.id], reason: 'wrong-product' }),
+    })
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res as Reply)).toBe('VALIDATION_FAILED')
+    expect(await entriesOf(guest)).toEqual([entry])
+    expect(await rowOf(entry.id)).toMatchObject({ removedAt: null, removedReason: null })
+  })
 })
