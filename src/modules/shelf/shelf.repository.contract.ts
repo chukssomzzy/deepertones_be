@@ -249,6 +249,22 @@ export const shelfRepositoryContract = (name: string, make: () => ShelfContractS
         expect(kept!.removedAt!.getTime()).toBe(at(5 * MINUTE).getTime())
       })
 
+      it('removes an entry the person said was the wrong product (reason wrong-product), keeps that reason, and the product is then no longer on the shelf', async () => {
+        const { repository, newProfile, put, stored } = await make()
+        const profileId = await newProfile()
+        const row = productRow(profileId)
+        await put(row)
+
+        expect(await repository.remove(profileId, row.id, 'wrong-product', at(2 * MINUTE))).toBe('removed')
+
+        const [kept] = await stored(profileId)
+        expect(kept).toMatchObject({ id: row.id, removedReason: 'wrong-product' })
+        expect(kept!.removedAt!.getTime()).toBe(at(2 * MINUTE).getTime())
+        expect(await repository.activeForProduct(profileId, row.productId!)).toBeNull()
+        expect(await repository.remove(profileId, row.id, 'finished', at(3 * MINUTE))).toBe('already-removed')
+        expect((await stored(profileId))[0]).toMatchObject({ removedReason: 'wrong-product' })
+      })
+
       it('removes with no reason: the time is set and the reason stays empty', async () => {
         const { repository, newProfile, put, stored } = await make()
         const profileId = await newProfile()

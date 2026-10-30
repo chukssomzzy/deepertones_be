@@ -4,7 +4,7 @@ import { ProductSummary } from '../scans/scans.schemas'
 import { FALLBACK_IP, rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { toEntryResponse, toShelfResponse } from './shelf.presenter'
-import { AddShelfProductBody, AddShelfProductResponse, EntryParams, RemoveShelfEntryBody, ShelfEntryResponse, ShelfResponse } from './shelf.schemas'
+import { AddShelfProductBody, AddShelfProductResponse, EntryParams, RemoveShelfEntryBody, ReplaceShelfEntryBody, ShelfEntryResponse, ShelfResponse } from './shelf.schemas'
 
 const bearer = [{ bearerAuth: [] }]
 
@@ -58,6 +58,31 @@ const addShelfProduct = defineRoute({
   },
 })
 
+const replaceShelfEntry = defineRoute({
+  method: 'post',
+  path: '/shelf/{entryId}/replace',
+  operationId: 'replaceShelfEntry',
+  tags: ['Shelf'],
+  summary: 'This isn\'t the right product: swap an entry for the right one',
+  description:
+    'Guests included. Body `{ productId }`, a named product from `GET /api/v1/products/search`. The entry is taken off the shelf (with the removed reason `wrong-product`, which no other route writes), ' +
+    'a wrong-match report is stored for the team, and the product is then added exactly as `POST /api/v1/me/shelf` adds it, with the same answers and the same daily limit: ' +
+    '200 with the entry when the right product is already on the shelf (the wrong one is still removed), or 202 with `{ scanId, itemId }` of a `typed` scan. ' +
+    'These are checked first, and none of them removes anything: 404 `SHELF_ENTRY_NOT_FOUND` for an entry that is unknown, removed or another profile\'s (not told apart), ' +
+    '400 `VALIDATION_FAILED` when `productId` is the entry\'s own product (that is not a swap), and 404 `PRODUCT_NOT_FOUND` for an unknown or unnamed product. ' +
+    'If the add then fails (429 `SCAN_DAILY_LIMIT`, or a provider error), the removal and the report stand and the error is answered as `POST /api/v1/me/shelf` answers it: ' +
+    'the wrong product stays off the shelf. That entry is then gone, so asking `/replace` for it again is 404 `SHELF_ENTRY_NOT_FOUND`: after a removal whose add failed, the app should add the right product with `POST /api/v1/me/shelf`.',
+  security: bearer,
+  // The order and the limiters are the search add's.
+  middleware: [rateLimit('SHELF_ADD_IP_LIMITER', 'ip'), signedIn(), rateLimit('SHELF_ADD_USER_LIMITER', 'user')],
+  request: { params: EntryParams, body: jsonBody(ReplaceShelfEntryBody) },
+  responses: {
+    200: success(ShelfEntryResponse, 'The right product was already on the shelf: its entry'),
+    202: success(AddShelfProductResponse, 'A typed scan was started'),
+    ...errorResponses(400, 401, 404, 429),
+  },
+})
+
 const removeShelfEntry = defineRoute({
   method: 'delete',
   path: '/shelf/{entryId}',
@@ -78,6 +103,7 @@ const removeShelfEntry = defineRoute({
 // empty body then fails as malformed. The remove route must also let a client that always sends the header remove with no reason.
 const removeShelfEntryServed = { ...removeShelfEntry, request: { params: EntryParams }, hide: true }
 const addShelfProductServed = { ...addShelfProduct, request: {}, hide: true }
+const replaceShelfEntryServed = { ...replaceShelfEntry, request: { params: EntryParams }, hide: true }
 
 /** No text, or only whitespace, is no reason; anything else must be a valid RemoveShelfEntryBody. */
 const readRemoveBody = (text: string) => (text.trim() === '' ? {} : readJsonBody(text, RemoveShelfEntryBody))
@@ -98,12 +124,19 @@ export const shelfRoutes = shelfApp
     if (added.status === 'exists') return ok(c, toEntryResponse(added.entry), 'Already on the shelf', 200)
     return ok(c, { scanId: added.scanId, itemId: added.itemId }, 'Scan started', 202)
   })
+  .openapi(replaceShelfEntryServed, async (c) => {
+    const { productId } = readJsonBody(await c.req.text(), ReplaceShelfEntryBody)
+    const added = await c.var.services.shelf.replace(c.req.valid('param').entryId, productId, c.req.header('cf-connecting-ip') ?? FALLBACK_IP)
+    if (added.status === 'exists') return ok(c, toEntryResponse(added.entry), 'Already on the shelf', 200)
+    return ok(c, { scanId: added.scanId, itemId: added.itemId }, 'Scan started', 202)
+  })
   .openapi(removeShelfEntryServed, async (c) => {
     const { reason } = readRemoveBody(await c.req.text())
     await c.var.services.shelf.remove(c.req.valid('param').entryId, reason)
     return c.body(null, 204)
   })
 
-// What these two routes document, registered by hand because they are served by their body-less copies.
+// What these three routes document, registered by hand because they are served by their body-less copies.
 shelfRoutes.openAPIRegistry.registerPath(documentedOnly(addShelfProduct))
+shelfRoutes.openAPIRegistry.registerPath(documentedOnly(replaceShelfEntry))
 shelfRoutes.openAPIRegistry.registerPath(documentedOnly(removeShelfEntry))

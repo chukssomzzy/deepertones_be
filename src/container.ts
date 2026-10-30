@@ -56,7 +56,9 @@ import { SkinCareService } from './modules/skin-care/skin-care.service'
 import type { SkinCareRoutine } from './modules/skin-care/skin-care.types'
 import { D1UsersRepository } from './modules/users/users.repository'
 import { UsersService } from './modules/users/users.service'
+import { D1VerdictReportsRepository } from './modules/verdicts/verdicts.reports.repository'
 import { D1VerdictsRepository } from './modules/verdicts/verdicts.repository'
+import { VerdictReportsService } from './modules/verdicts/verdicts.reports.service'
 import { VerdictService } from './modules/verdicts/verdicts.service'
 import { routineWriterWriteRoutinePrompt } from './prompts/prompts.generated'
 import { AnthropicClient } from './providers/anthropic/anthropic.client'
@@ -358,8 +360,19 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const verdictReportsRepository = once(() => new D1VerdictReportsRepository(db()))
+
   const shelf = once(
-    () => new ShelfService({ repository: new D1ShelfRepository(db()), catalog: catalog(), scans: scans(), now: () => new Date() }),
+    () =>
+      new ShelfService({
+        repository: new D1ShelfRepository(db()),
+        catalog: catalog(),
+        scans: scans(),
+        // Structural, so shelf does not import verdicts: the swap's report goes to the verdicts' report table.
+        wrongMatches: { record: (report, now) => verdictReportsRepository().recordWrongMatch(report, now) },
+        opsAlerts: opsAlerts(),
+        now: () => new Date(),
+      }),
   )
 
   const perfectCorp = once(() => new RestPerfectCorpClient({ apiKey: env.PERFECT_CORP_API_KEY, webhookSecret: env.PERFECT_CORP_WEBHOOK_SECRET, baseUrl: env.PERFECT_CORP_BASE_URL }))
@@ -439,6 +452,10 @@ export const buildContainer = (env: CloudflareBindings) => {
         onRoutineTrigger: routineTrigger,
         now: () => new Date(),
       }),
+  )
+
+  const verdictReports = once(
+    () => new VerdictReportsService({ repository: verdictReportsRepository(), verdicts: verdicts(), opsAlerts: opsAlerts(), now: () => new Date() }),
   )
 
   const routines = once(() => {
@@ -635,6 +652,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get verdicts() {
       return verdicts()
+    },
+    get verdictReports() {
+      return verdictReports()
     },
   }
 }

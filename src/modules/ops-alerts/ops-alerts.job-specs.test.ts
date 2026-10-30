@@ -22,7 +22,7 @@ describe('sendOpsAlertSpec', () => {
     expect(sendOpsAlertSpec.retry).toEqual({ baseSeconds: 5, factor: 3, capSeconds: 135 })
   })
 
-  it.each(['ai-account', 'ai-spend-cap', 'research-budget', 'analysis-budget'])('accepts the kind %s', (kind) => {
+  it.each(['ai-account', 'ai-spend-cap', 'research-budget', 'analysis-budget', 'verdict-report', 'wrong-match-report', 'share-render-quota'])('accepts the kind %s', (kind) => {
     expect(sendOpsAlertSpec.schema.safeParse({ kind, windowStart: 1000 }).success).toBe(true)
   })
 
