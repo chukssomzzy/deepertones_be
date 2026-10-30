@@ -261,6 +261,11 @@ deployed ones (the same gitignored files as above). The token is sent only in th
   sheet. An upload is refused, before anything is sent, if the file was exported from another environment or for another contract version, and the
   server refuses it (`CATALOG_STALE`) if the catalog has moved on since: export again and redo the edits on the new file. `catalog:export` will not replace a file that already exists unless you pass
   `--force`.
+- **Contract 2.4.0: export again after this is deployed, and fill three things before the next import.** A file exported at 2.3.0 (or earlier) is refused by
+  `catalog:upload` with a message to export again, and by the server as `409 CONTRACT_MISMATCH`. The Ingredients and Claim words tabs gain `reviewer_role`, the
+  role of the reviewer as the app shows it under "Reviewed by" (for example "a consultant dermatologist", never a name), required on every approved row; Claim words
+  also gains an optional `source_url`; and the Escalations tab needs an approved row for a new reason, `about-a-product` (who to see, how soon and what to tell
+  them when a person asks to talk to a professional about a shelf product). The contract document lists the columns.
 - **Contract 2.3.0: export again after this is deployed, and fill the required rows of four new tabs before the next import.** The Reintroductions, Escalations,
   Responses and Weeks tabs hold the reviewed text of the daily loop. A file exported at 2.2.0 (or earlier) is refused by `catalog:upload` with a message to export
   again, and by the server as `409 CONTRACT_MISMATCH`. The live catalog has none of these rows yet, so a fresh export has four empty tabs, and the server refuses it

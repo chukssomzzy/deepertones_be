@@ -30,6 +30,7 @@ describe('the reads on a database where nobody has written the reviewed tabs', (
     expect(await workbook().reintroductionFor(null)).toEqual([])
     expect(await workbook().reintroductionFor('retinoid')).toEqual([])
     expect(await workbook().escalationFor('swelling')).toBeNull()
+    expect(await workbook().escalationFor('about-a-product')).toBeNull()
     expect(await workbook().responseFor('paused')).toBeNull()
     expect(await workbook().weekCardFor(1, 'glow', false)).toBeNull()
     expect(await workbook().weekCardFor(20, 'glow', true)).toBeNull()
@@ -95,6 +96,13 @@ describe('escalationFor after the team has written escalations', () => {
 
     expect(await workbook().escalationFor('swelling')).toEqual({ whoToSee: 'Who to see for swelling.', howSoon: 'How soon for swelling.', whatToTellThem: 'What to tell them for swelling.' })
     for (const reason of REASONS) expect(await workbook().escalationFor(reason), reason).toMatchObject({ whoToSee: `Who to see for ${reason}.` })
+  })
+
+  it('gives the reviewed text for a shelf product under about-a-product, who to see, how soon and what to tell them', async () => {
+    await applied((w) => (w.escalations.rows = allEscalationRows().map((row) => (row.reason === 'about-a-product' ? { ...row, who_to_see: 'A pharmacist or a dermatologist.', how_soon: 'Before you use it again.', what_to_tell_them: 'The product, and what you noticed.' } : row))))
+
+    expect(await workbook().escalationFor('about-a-product')).toEqual({ whoToSee: 'A pharmacist or a dermatologist.', howSoon: 'Before you use it again.', whatToTellThem: 'The product, and what you noticed.' })
+    expect(await workbook().escalationFor('swelling')).toMatchObject({ whoToSee: 'Who to see for swelling.' })
   })
 
   it('reads what is live now: a changed text is given as changed after the upload', async () => {

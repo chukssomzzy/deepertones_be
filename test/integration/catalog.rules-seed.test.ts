@@ -19,6 +19,7 @@ type RuleRow = {
   statement: string
   source_url: string | null
   helps: string
+  reviewer_role: string | null
   status: string
   approved_by: string | null
   approved_on: string | null
@@ -70,6 +71,14 @@ describe('the seeded ingredient rules', () => {
     }
   })
 
+  // reviewer_role is new in contract 2.4.0: the migration adds the column and leaves it empty, so a seeded rule reads as having no reviewer role.
+  it('has no reviewer role on any seeded rule: the column is added empty, so a verdict shows no "Reviewed by" line for a rule stored before contract 2.4.0', async () => {
+    const rows = await rules()
+
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) expect(row.reviewer_role, row.code).toBeNull()
+  })
+
   it('gives every rule a unique code of at most 40 characters, made of capital letters, digits and hyphens, starting ING-', async () => {
     const codes = (await rules()).map((r) => r.code)
 
@@ -99,103 +108,74 @@ describe('the seeded ingredient rules', () => {
     expect(long?.code.startsWith('ING-HYDROXYISOHEXYL-3-CYCLOHEXENE-')).toBe(true)
   })
 
-  // The seed is the first real use of the contract: if the Ingredients tab would refuse it, the seed would never survive a round trip
-  // through a workbook (export, edit, upload).
-  it('would pass the workbook contract as an Ingredients tab, so an export of the seed uploads back with no problem', async () => {
-    const ingredients = (await rules()).map((r) => ({
-      code: r.code,
-      name: r.name,
-      aliases: (JSON.parse(r.aliases) as string[]).join(';'),
-      kind: r.kind,
-      strength_limit: r.strength_limit,
-      statement: r.statement,
-      source_url: r.source_url,
-      helps: (JSON.parse(r.helps) as string[]).join(';'),
-      status: r.status,
-      approved_by: r.approved_by,
-      approved_on: r.approved_on,
-      audited_by: r.audited_by,
-      audited_on: r.audited_on,
-    }))
-
+  // The seed is the first real use of the contract: an export of it, edited and uploaded, must be a workbook the contract can accept. Under contract 2.4.0 an approved rule needs a
+  // reviewer_role and the seed has none, which is on purpose: the team names a role for every seeded rule before the first 2.4.0 import.
+  describe('as an Ingredients tab of the workbook contract', () => {
     const tab = (headers: string[], rows: Record<string, string | null>[] = []) => ({ headers, rows })
-    const headers = ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on']
+    const SIGNED = { status: 'approved', approved_by: 'Dr A. Reviewer', approved_on: BASE.toISOString().slice(0, 10), audited_by: null, audited_on: null }
+    const asIngredients = async (reviewerRole: string | null) =>
+      (await rules()).map((r) => ({
+        code: r.code,
+        name: r.name,
+        aliases: (JSON.parse(r.aliases) as string[]).join(';'),
+        kind: r.kind,
+        strength_limit: r.strength_limit,
+        statement: r.statement,
+        source_url: r.source_url,
+        helps: (JSON.parse(r.helps) as string[]).join(';'),
+        reviewer_role: reviewerRole,
+        status: r.status,
+        approved_by: r.approved_by,
+        approved_on: r.approved_on,
+        audited_by: r.audited_by,
+        audited_on: r.audited_on,
+      }))
+    const INGREDIENT_HEADERS = ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'reviewer_role', 'approved_on', 'audited_by', 'audited_on']
 
-    expect(
-      validateWorkbook({
-        products: tab(['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'key_ingredient', 'strength', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells']),
-        availability: tab(['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url']),
-        ingredients: tab(headers, ingredients),
-        countries: tab(['code', 'currency', 'low_max', 'mid_max', 'status']),
-        claimWords: tab(['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on']),
-        tapers: tab(['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on']),
-        // The contract needs a base guide for each step, which the seed does not have: the team writes them, so this stands in for those four rows.
-        guides: tab(
-          ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
-          ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => ({
-            step,
-            goal: null,
-            what_it_does: 'What the step does.',
-            look_for: 'What to look for.',
-            for_deeper_skin: 'What suits deeper skin.',
-            look_for_when_pregnant: null,
-            status: 'approved',
-            approved_by: 'Dr A. Reviewer',
-            approved_on: BASE.toISOString().slice(0, 10),
-            audited_by: null,
-            audited_on: null,
-          })),
-        ),
-        // The same for the four reviewed tabs of contract 2.3.0: the default ladder, a row for each reason and each outcome, and a base card for each band.
-        reintroductions: tab(
-          ['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
-          [{ group: null, schedule: '1: weekly; 2: back', status: 'approved', approved_by: 'Dr A. Reviewer', approved_on: BASE.toISOString().slice(0, 10), audited_by: null, audited_on: null }],
-        ),
-        escalations: tab(
-          ['reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
-          ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'].map((reason) => ({
-            reason,
-            who_to_see: 'A doctor.',
-            how_soon: 'Today.',
-            what_to_tell_them: 'What you noticed.',
-            status: 'approved',
-            approved_by: 'Dr A. Reviewer',
-            approved_on: BASE.toISOString().slice(0, 10),
-            audited_by: null,
-            audited_on: null,
-          })),
-        ),
-        responses: tab(
-          ['outcome', 'title', 'body', 'what_to_do_now', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
-          ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'].map((outcome) => ({
-            outcome,
-            title: 'A title',
-            body: 'A body for your {step}.',
-            what_to_do_now: null,
-            status: 'approved',
-            approved_by: 'Dr A. Reviewer',
-            approved_on: BASE.toISOString().slice(0, 10),
-            audited_by: null,
-            audited_on: null,
-          })),
-        ),
-        weeks: tab(
-          ['band', 'goal', 'step_down', 'title', 'text', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
-          ['1', '2', '3-4', '5-8', '9-12'].map((band) => ({
-            band,
-            goal: null,
-            step_down: 'no',
-            title: 'A title',
-            text: 'A text.',
-            status: 'approved',
-            approved_by: 'Dr A. Reviewer',
-            approved_on: BASE.toISOString().slice(0, 10),
-            audited_by: null,
-            audited_on: null,
-          })),
-        ),
-      }),
-    ).toMatchObject({ ok: true })
+    const workbookWith = (ingredients: Record<string, string | null>[]) => ({
+      products: tab(['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'key_ingredient', 'strength', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells']),
+      availability: tab(['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url']),
+      ingredients: tab(INGREDIENT_HEADERS, ingredients),
+      countries: tab(['code', 'currency', 'low_max', 'mid_max', 'status']),
+      claimWords: tab(['code', 'phrase', 'claim', 'source_url', 'status', 'approved_by', 'reviewer_role', 'approved_on', 'audited_by', 'audited_on']),
+      tapers: tab(['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on']),
+      // The contract needs a base guide for each step, which the seed does not have: the team writes them, so this stands in for those four rows.
+      guides: tab(
+        ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+        ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => ({ step, goal: null, what_it_does: 'What the step does.', look_for: 'What to look for.', for_deeper_skin: 'What suits deeper skin.', look_for_when_pregnant: null, ...SIGNED })),
+      ),
+      // The same for the four reviewed tabs of contract 2.3.0: the default ladder, a row for each reason (the shelf-product one of contract 2.4.0 included) and each outcome, and a base card for each band.
+      reintroductions: tab(['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'], [{ group: null, schedule: '1: weekly; 2: back', ...SIGNED }]),
+      escalations: tab(
+        ['reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+        ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down', 'about-a-product'].map((reason) => ({
+          reason,
+          who_to_see: 'A doctor.',
+          how_soon: 'Today.',
+          what_to_tell_them: 'What you noticed.',
+          ...SIGNED,
+        })),
+      ),
+      responses: tab(
+        ['outcome', 'title', 'body', 'what_to_do_now', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+        ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'].map((outcome) => ({ outcome, title: 'A title', body: 'A body for your {step}.', what_to_do_now: null, ...SIGNED })),
+      ),
+      weeks: tab(
+        ['band', 'goal', 'step_down', 'title', 'text', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+        ['1', '2', '3-4', '5-8', '9-12'].map((band) => ({ band, goal: null, step_down: 'no', title: 'A title', text: 'A text.', ...SIGNED })),
+      ),
+    })
+
+    it('passes once each seeded rule is given a reviewer_role, so an export of the seed uploads back with no problem', async () => {
+      expect(validateWorkbook(workbookWith(await asIngredients('a consultant dermatologist')))).toMatchObject({ ok: true })
+    })
+
+    it('is refused exactly once for each seeded rule, on its reviewer_role cell, until it is given one', async () => {
+      const result = validateWorkbook(workbookWith(await asIngredients(null)))
+
+      expect(result.ok).toBe(false)
+      expect(result.ok ? [] : result.problems).toEqual((await rules()).map((_, index) => ({ tab: 'ingredients', row: index + 2, column: 'reviewer_role', rule: 'REQUIRED_WHEN_APPROVED' })))
+    })
   })
 })
 

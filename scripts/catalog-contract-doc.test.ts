@@ -36,8 +36,23 @@ describe('docs/catalog-workbook-contract.md', () => {
       'group', 'clashes_with', 'phrase', 'claim', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if',
       'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant',
       'reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'outcome', 'body', 'what_to_do_now', 'band', 'step_down', 'title', 'text',
+      'reviewer_role',
     ]) {
       expect(doc, column).toContain(column)
+    }
+  })
+
+  it('tells the people who fill reviewer_role in that it is a role the app shows under "Reviewed by", and never a name, on the Ingredients and Claim words tabs both', async () => {
+    const doc = await renderContractDoc()
+
+    for (const [tab, next] of [['Ingredients', 'Countries'], ['Claim words', 'Tapers']] as const) {
+      const start = doc.indexOf(`### ${tab}`)
+      const section = doc.slice(start, doc.indexOf(`### ${next}`, start + 1))
+
+      expect(start, tab).toBeGreaterThan(-1)
+      expect(section, tab).toContain('reviewer_role')
+      expect(section, tab).toContain('Reviewed by')
+      expect(section, tab).toMatch(/never a name/i)
     }
   })
 
@@ -65,7 +80,7 @@ describe('docs/catalog-workbook-contract.md', () => {
     const doc = await renderContractDoc()
 
     for (const value of [
-      'pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down',
+      'pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down', 'about-a-product',
       'paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause',
       '3-4', '5-8', '9-12',
     ]) {

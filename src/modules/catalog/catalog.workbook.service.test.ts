@@ -21,9 +21,11 @@ const product = (over: RawRow = {}): RawRow => ({
 })
 const rule = (over: RawRow = {}): RawRow => ({
   code: 'ING-ZZ-ONE', name: 'zzyzx extractum', aliases: null, kind: 'irritation', strength_limit: null, statement: 'Commonly reported to sting.', source_url: null, helps: null, group: null, clashes_with: null,
-  status: 'approved', approved_by: 'Dr A', approved_on: '2030-01-02', audited_by: null, audited_on: null, ...over,
+  status: 'approved', approved_by: 'Dr A', reviewer_role: 'a consultant dermatologist', approved_on: '2030-01-02', audited_by: null, audited_on: null, ...over,
 })
-const claimWord = (over: RawRow = {}): RawRow => ({ code: 'CLM-WHITENING', phrase: 'whitening', claim: 'lightening', status: 'approved', approved_by: 'Dr A', approved_on: '2030-01-02', audited_by: null, audited_on: null, ...over })
+const claimWord = (over: RawRow = {}): RawRow => ({
+  code: 'CLM-WHITENING', phrase: 'whitening', claim: 'lightening', source_url: null, status: 'approved', approved_by: 'Dr A', reviewer_role: 'a consultant dermatologist', approved_on: '2030-01-02', audited_by: null, audited_on: null, ...over,
+})
 const taper = (over: RawRow = {}): RawRow => ({
   code: 'TPR-STEROID-1', kind: 'steroid', schedule: '1-2: alternate-days; 3-4: weekly; 5: stop', what_to_expect: 'Skin may flare for a few days after each step down. This is expected.',
   see_a_professional_if: 'The redness spreads, or the skin weeps or blisters.', status: 'approved', approved_by: 'Dr A', approved_on: '2030-01-02', audited_by: null, audited_on: null, ...over,
@@ -35,8 +37,8 @@ const guide = (over: RawRow = {}): RawRow => ({
 /** The four approved base rows, each saying its own step so a test can tell which one it was given. */
 const baseGuides = (): RawRow[] =>
   ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => guide({ step, what_it_does: `What ${step} does.`, look_for: `What to look for in ${step}.`, for_deeper_skin: `Deeper skin and ${step}.` }))
-// The four reviewed tabs of contract 2.3.0. Each row says its own key in its text, so a test can tell which row it was given.
-const REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'] as const
+// The four reviewed tabs of contract 2.3.0 (and the reason of 2.4.0). Each row says its own key in its text, so a test can tell which row it was given.
+const REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down', 'about-a-product'] as const
 const OUTCOMES = ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'] as const
 const BANDS = ['1', '2', '3-4', '5-8', '9-12'] as const
 const sign = { status: 'approved', approved_by: 'Dr A', approved_on: '2030-01-02', audited_by: null, audited_on: null }
@@ -73,11 +75,13 @@ const REVIEWED: Record<ReviewedTab, { rows: () => RawRow[]; keyOf: (row: RawRow)
  * The live workbook as the export gives it, with `edit` applied. A catalog that has never had them exports the tabs that need rows empty, which the contract refuses, so
  * unless the test is about one (`guides: false`, or its name in `skip`) the rows each is missing are added, as the team fills them in before an import: a base row for each step,
  * the default ladder, a row for each reason and each outcome, a base card for each band. `approver` signs the rows that are added, for a test of the production approver gate.
+ * The rules the migration seeded, and any rule or claim word stored before contract 2.4.0, have no reviewer_role, which the contract needs of an approved row, so unless the test is about
+ * it (`reviewerRoles: false`) each approved one without a role is given one, as the team does before its first 2.4.0 import.
  */
 const edited = async (
   service: CatalogWorkbookService,
   edit: (workbook: RawWorkbook) => void,
-  options: { guides?: boolean; skip?: ReviewedTab[]; approver?: string } = {},
+  options: { guides?: boolean; skip?: ReviewedTab[]; approver?: string; reviewerRoles?: boolean } = {},
 ): Promise<{ workbook: RawWorkbook; baseVersion: number }> => {
   const live = await service.exportWorkbook()
   edit(live.workbook)
@@ -91,6 +95,11 @@ const edited = async (
     if (options.skip?.includes(name)) continue
     for (const needed of rows()) {
       if (!live.workbook[name].rows.some((row) => keyOf(row) === keyOf(needed) && row.status === 'approved')) live.workbook[name].rows.push(signed(needed))
+    }
+  }
+  if (options.reviewerRoles !== false) {
+    for (const tab of [live.workbook.ingredients, live.workbook.claimWords]) {
+      for (const row of tab.rows) if (row.status === 'approved' && (row.reviewer_role ?? null) === null) row.reviewer_role = 'a consultant dermatologist'
     }
   }
   return { workbook: live.workbook, baseVersion: live.catalogVersion }
@@ -107,12 +116,12 @@ describe('CatalogWorkbookService.exportWorkbook', () => {
 
     const live = await service.exportWorkbook()
 
-    expect(live).toMatchObject({ catalogVersion: 1, contractVersion: '2.3.0' })
+    expect(live).toMatchObject({ catalogVersion: 1, contractVersion: '2.4.0' })
     expect(live.workbook.products).toEqual({ headers: expect.arrayContaining(['code', 'status', 'draft_cells']), rows: [] })
     expect(live.workbook.ingredients.rows.length).toBeGreaterThan(0)
   })
 
-  it('has no guides, ladders, escalations, responses or week cards until the team writes them, so a fresh export fails the contract on nothing but the rows those five tabs need', async () => {
+  it('has no guides, ladders, escalations, responses or week cards until the team writes them, and no reviewer_role on a seeded rule, so a fresh export fails the contract on nothing but those', async () => {
     const { service } = build()
 
     const { workbook } = await service.exportWorkbook()
@@ -123,6 +132,8 @@ describe('CatalogWorkbookService.exportWorkbook', () => {
     expect(result.ok ? [] : [...result.problems].sort((a, b) => a.tab.localeCompare(b.tab))).toEqual([
       { tab: 'escalations', row: 1, column: 'reason', rule: 'ESCALATION_MISSING' },
       { tab: 'guides', row: 1, column: 'step', rule: 'GUIDE_BASE_MISSING' },
+      // Every seeded rule is approved and has no reviewer role (row 1 is the header row).
+      ...workbook.ingredients.rows.map((_, index) => ({ tab: 'ingredients', row: index + 2, column: 'reviewer_role', rule: 'REQUIRED_WHEN_APPROVED' })),
       { tab: 'reintroductions', row: 1, column: 'group', rule: 'REINTRO_DEFAULT_MISSING' },
       { tab: 'responses', row: 1, column: 'outcome', rule: 'RESPONSE_MISSING' },
       { tab: 'weeks', row: 1, column: 'band', rule: 'WEEK_BASE_MISSING' },
@@ -156,13 +167,23 @@ describe('CatalogWorkbookService.exportWorkbook', () => {
 
     const { workbook } = await service.exportWorkbook()
 
-    expect(workbook.claimWords).toEqual({ headers: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'], rows: [] })
+    expect(workbook.claimWords).toEqual({ headers: ['code', 'phrase', 'claim', 'source_url', 'status', 'approved_by', 'reviewer_role', 'approved_on', 'audited_by', 'audited_on'], rows: [] })
     expect(workbook.tapers).toEqual({
       headers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
       rows: [],
     })
     expect(workbook.ingredients.headers).toEqual(expect.arrayContaining(['group', 'clashes_with']))
     expect(workbook.ingredients.rows.every((row) => row.group === null && row.clashes_with === null)).toBe(true)
+  })
+
+  it('gives the reviewer_role column on the Ingredients tab, after approved_by, empty on every seeded rule: a seeded rule has no reviewer role until the team names one', async () => {
+    const { service } = build()
+
+    const { workbook } = await service.exportWorkbook()
+
+    expect(workbook.ingredients.headers).toEqual(['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'reviewer_role', 'approved_on', 'audited_by', 'audited_on'])
+    expect(workbook.ingredients.rows.length).toBeGreaterThan(0)
+    expect(workbook.ingredients.rows.every((row) => row.reviewer_role === null)).toBe(true)
   })
 })
 
@@ -344,6 +365,7 @@ describe('CatalogWorkbookService.importWorkbook: the contract version', () => {
     ['the 2.0.0 contract (before key_ingredient and strength)', '2.0.0'],
     ['the 2.1.0 contract (before the Guides tab)', '2.1.0'],
     ['the 2.2.0 contract (before the Reintroductions, Escalations, Responses and Weeks tabs)', '2.2.0'],
+    ['the 2.3.0 contract (before reviewer_role, the claim word source_url and the about-a-product escalation)', '2.3.0'],
     ['a newer contract', '9.9.9'],
     ['no version at all', ''],
   ])('refuses a file made for %s with a ConflictError CONTRACT_MISMATCH, for a dry run and an apply alike, and writes nothing', async (_what, contractVersion) => {
@@ -517,12 +539,14 @@ describe('CatalogWorkbookService.importWorkbook: rule metadata (group and clashe
 
   it('keeps the seed version seed-2026-10 when groups and clashes are put on the seeded rules, and stores them, reporting those rules as updated', async () => {
     const { service, repository } = build()
+    // The seeded rules first get the reviewer_role contract 2.4.0 needs of them (the first 2.4.0 import), so that the groups are the only change of the import after it.
     const seeded = await edited(service, () => {})
+    await service.importWorkbook({ ...seeded, file: FILE, dryRun: false, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
     const [one, two] = [seeded.workbook.ingredients.rows[0]!.code as string, seeded.workbook.ingredients.rows[1]!.code as string]
 
     const result = await service.importWorkbook({ ...(await edited(service, withGroups)), file: FILE, dryRun: false, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
 
-    expect(result).toMatchObject({ applied: true, catalogVersion: 2 })
+    expect(result).toMatchObject({ applied: true, catalogVersion: 3 })
     expect([...result.diff.ingredients.updated].sort()).toEqual([one, two].sort())
     expect((await repository.liveRules()).version).toBe(REFERENCE_VERSION)
     const live = await service.exportWorkbook()
@@ -564,6 +588,96 @@ describe('CatalogWorkbookService.importWorkbook: rule metadata (group and clashe
     await service.importWorkbook({ ...(await edited(service, (w) => (w.ingredients.rows = w.ingredients.rows.filter((row) => row.code !== 'ING-ZZ-ONE')))), file: FILE, dryRun: false, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
 
     expect((await repository.liveRules()).version).toBe(REFERENCE_VERSION)
+  })
+})
+
+describe('CatalogWorkbookService.importWorkbook: reviewer_role and the claim word source_url (contract 2.4.0)', () => {
+  /** An import that is applied, with the rules and claim words it is given. */
+  const apply = async (service: CatalogWorkbookService, edit: (workbook: RawWorkbook) => void, options: Parameters<typeof edited>[2] = {}) =>
+    service.importWorkbook({ ...(await edited(service, edit, options)), file: FILE, dryRun: false, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+  const dry = async (service: CatalogWorkbookService, edit: (workbook: RawWorkbook) => void, options: Parameters<typeof edited>[2] = {}) =>
+    service.importWorkbook({ ...(await edited(service, edit, options)), file: null, dryRun: true, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+  const ruleNow = async (service: CatalogWorkbookService, code: string) => (await service.exportWorkbook()).workbook.ingredients.rows.find((row) => row.code === code)
+
+  it('refuses an approved rule or claim word with no reviewer_role, naming the cell, and writes nothing', async () => {
+    const { service, repository, archive } = build()
+
+    await expect(apply(service, (w) => w.ingredients.rows.push(rule({ reviewer_role: null })), { reviewerRoles: false })).rejects.toMatchObject({ name: 'ValidationError', code: 'CATALOG_INVALID' })
+    await expect(apply(service, (w) => w.claimWords.rows.push(claimWord({ reviewer_role: null })), { reviewerRoles: false })).rejects.toMatchObject({ name: 'ValidationError', code: 'CATALOG_INVALID' })
+
+    expect(await repository.catalogVersion()).toBe(1)
+    expect(archive.stored.size).toBe(0)
+  })
+
+  it('stores the reviewer_role of a rule and of a claim word, and the source_url of a claim word, and gives them back in the export as uploaded', async () => {
+    const { service } = build()
+
+    const result = await apply(service, (w) => {
+      w.ingredients.rows.push(rule({ reviewer_role: 'a registered pharmacist' }))
+      w.claimWords.rows.push(claimWord({ reviewer_role: 'a consultant dermatologist', source_url: 'https://example.com/why-flagged' }))
+    })
+
+    expect(result).toMatchObject({ applied: true, catalogVersion: 2 })
+    expect(result.diff.ingredients.added).toEqual(['ING-ZZ-ONE'])
+    expect(result.diff.claimWords.added).toEqual(['CLM-WHITENING'])
+    const live = await service.exportWorkbook()
+    expect(await ruleNow(service, 'ING-ZZ-ONE')).toMatchObject({ reviewer_role: 'a registered pharmacist' })
+    expect(live.workbook.claimWords.rows).toEqual([claimWord({ reviewer_role: 'a consultant dermatologist', source_url: 'https://example.com/why-flagged' })])
+  })
+
+  it('reports a rule whose only change is its reviewer_role as updated, in a dry run, and writes nothing', async () => {
+    const { service, repository } = build()
+    await apply(service, (w) => w.ingredients.rows.push(rule({ reviewer_role: 'a pharmacist' })))
+
+    const result = await dry(service, (w) => (w.ingredients.rows.find((row) => row.code === 'ING-ZZ-ONE')!.reviewer_role = 'a consultant dermatologist'))
+
+    expect(result.diff.ingredients).toEqual({ added: [], updated: ['ING-ZZ-ONE'], retired: [], reactivated: [] })
+    expect(await repository.catalogVersion()).toBe(2)
+    expect((await ruleNow(service, 'ING-ZZ-ONE'))?.reviewer_role).toBe('a pharmacist')
+  })
+
+  it('reports a claim word whose only change is its reviewer_role, or only its source_url, as updated', async () => {
+    const { service } = build()
+    await apply(service, (w) => w.claimWords.rows.push(claimWord(), claimWord({ code: 'CLM-BLEACHING', phrase: 'bleaching' })))
+
+    const role = await dry(service, (w) => (w.claimWords.rows.find((row) => row.code === 'CLM-WHITENING')!.reviewer_role = 'a pharmacist'))
+    const source = await dry(service, (w) => (w.claimWords.rows.find((row) => row.code === 'CLM-BLEACHING')!.source_url = 'https://example.com/source'))
+
+    expect(role.diff.claimWords).toEqual({ added: [], updated: ['CLM-WHITENING'], retired: [], reactivated: [] })
+    expect(source.diff.claimWords).toEqual({ added: [], updated: ['CLM-BLEACHING'], retired: [], reactivated: [] })
+  })
+
+  it('does not move the rules version when the reviewer_role of an approved rule changes: it is metadata the verdict reads, not what the matcher reads', async () => {
+    const { service, repository } = build()
+    await apply(service, (w) => w.ingredients.rows.push(rule({ reviewer_role: 'a pharmacist' })))
+    const before = (await repository.liveRules()).version
+    expect(before).toMatch(/^rules-[0-9a-f]{16}$/)
+
+    const result = await apply(service, (w) => (w.ingredients.rows.find((row) => row.code === 'ING-ZZ-ONE')!.reviewer_role = 'a consultant dermatologist'))
+
+    expect(result.diff.ingredients.updated).toEqual(['ING-ZZ-ONE'])
+    expect((await ruleNow(service, 'ING-ZZ-ONE'))?.reviewer_role).toBe('a consultant dermatologist')
+    expect((await repository.liveRules()).version).toBe(before)
+  })
+
+  it('keeps the seed version when the seeded rules are given their reviewer_role, so no formulation analysed at the seed version is analysed again', async () => {
+    const { service, repository } = build()
+
+    const result = await apply(service, () => {})
+
+    expect(result.diff.ingredients.updated.length).toBeGreaterThan(0)
+    expect((await ruleNow(service, result.diff.ingredients.updated[0]!))?.reviewer_role).toBe('a consultant dermatologist')
+    expect((await repository.liveRules()).version).toBe(REFERENCE_VERSION)
+  })
+
+  it('does not move the rules version when only a claim word changes: claim words are not rules the matcher applies', async () => {
+    const { service, repository } = build()
+    await apply(service, (w) => w.claimWords.rows.push(claimWord()))
+    const before = (await repository.liveRules()).version
+
+    await apply(service, (w) => Object.assign(w.claimWords.rows[0]!, { reviewer_role: 'a pharmacist', source_url: 'https://example.com/source' }))
+
+    expect((await repository.liveRules()).version).toBe(before)
   })
 })
 

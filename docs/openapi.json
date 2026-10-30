@@ -5447,7 +5447,7 @@
           },
           "contractVersion": {
             "type": "string",
-            "example": "2.3.0",
+            "example": "2.4.0",
             "description": "The contract version of the workbook: send it back as `contractVersion` when importing the edited workbook."
           },
           "workbook": {
@@ -13642,7 +13642,7 @@
                     "minLength": 1,
                     "maxLength": 20,
                     "description": "The `contractVersion` of the export the workbook was edited from. A workbook made for another contract version is refused with 409 `CONTRACT_MISMATCH`, before anything else is checked.",
-                    "example": "2.3.0"
+                    "example": "2.4.0"
                   },
                   "uploadedBy": {
                     "type": "string",

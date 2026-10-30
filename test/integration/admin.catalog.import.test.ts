@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers'
 import type { RawRow, RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
+import { REFERENCE_VERSION } from '../../src/modules/catalog/catalog.reference'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   APPROVED_ON,
@@ -57,8 +58,13 @@ const RULES_VERSION = /^rules-[0-9a-f]{16}$/
 
 // A fresh catalog has no guides, and the contract refuses a workbook without the four base ones, so the team writes them before the first import. The helpers here add
 // any a step lacks (`upload`), which would make the first upload of the file the one that carries them. Done once up front, every test's diff is only what it is about.
+let versionBeforeRoles = ''
+let versionAfterRoles = ''
 beforeAll(async () => {
+  versionBeforeRoles = await rulesVersion()
+  // This first upload also gives every seeded rule the reviewer_role contract 2.4.0 needs of an approved row (`upload` adds it, as the team does before its first 2.4.0 import).
   await applied(() => {})
+  versionAfterRoles = await rulesVersion()
 })
 
 /** A product with its availability in Nigeria and the country itself, as one edit. */
@@ -507,6 +513,40 @@ describe('retiring and reactivating', () => {
   })
 })
 
+describe('the first 2.4.0 import of a catalog stored before it', () => {
+  it('gives every seeded rule its reviewer_role without moving the rules version: the seed rules apply exactly as they did', async () => {
+    const { workbook } = await exportLive()
+
+    expect(workbook.ingredients.rows.length).toBeGreaterThan(0)
+    for (const row of workbook.ingredients.rows) expect(row.reviewer_role, String(row.code)).toEqual(expect.stringMatching(/\S/))
+    expect(versionBeforeRoles).toBe(REFERENCE_VERSION)
+    expect(versionAfterRoles).toBe(REFERENCE_VERSION)
+  })
+
+  it('refuses an approved rule or claim word with no reviewer_role, 400 CATALOG_INVALID with REQUIRED_WHEN_APPROVED on that cell, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.ingredients.rows.push(ruleRow({ reviewer_role: null }))
+      workbook.claimWords.rows.push(claimWordRow({ reviewer_role: null }))
+    })
+    const rule = bad.ingredients.rows.length + 1
+    const claim = bad.claimWords.rows.length + 1
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: false, file: xlsxBytes('no-reviewer-role') })
+
+    expect(res.status).toBe(400)
+    const error = await errorOf(res)
+    expect(error.code).toBe('CATALOG_INVALID')
+    expect((error.details as { problems: unknown[] }).problems).toEqual([
+      { tab: 'ingredients', row: rule, column: 'reviewer_role', rule: 'REQUIRED_WHEN_APPROVED' },
+      { tab: 'claimWords', row: claim, column: 'reviewer_role', rule: 'REQUIRED_WHEN_APPROVED' },
+    ])
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+})
+
 describe('the rules version', () => {
   it('does not change when a Products-only upload is applied, so no product is analysed again', async () => {
     const version = await rulesVersion()
@@ -560,6 +600,38 @@ describe('the rules version', () => {
     const after = await rulesVersion()
     expect(after).toMatch(RULES_VERSION)
     expect(after).not.toBe(before)
+  })
+
+  it('does not change when only the reviewer_role of an approved rule changes: it is metadata the verdict reads, and the matcher does not', async () => {
+    const rule = ruleRow({ reviewer_role: 'a pharmacist' })
+    await applied((workbook) => {
+      workbook.ingredients.rows.push({ ...rule })
+    })
+    const before = await rulesVersion()
+
+    const { data } = await applied((workbook) => {
+      rowWith(workbook.ingredients, 'code', rule.code)!.reviewer_role = 'a consultant dermatologist'
+    })
+
+    expect(sorted(data.diff).ingredients).toEqual(diffOf({ updated: [rule.code as string] }))
+    expect(rowWith((await exportLive()).workbook.ingredients, 'code', rule.code)).toMatchObject({ reviewer_role: 'a consultant dermatologist' })
+    expect(await rulesVersion()).toBe(before)
+  })
+
+  it('does not change when only the reviewer_role and the source_url of an approved claim word change', async () => {
+    const claim = claimWordRow({ reviewer_role: 'a pharmacist', source_url: null })
+    await applied((workbook) => {
+      workbook.claimWords.rows.push({ ...claim })
+    })
+    const before = await rulesVersion()
+
+    const { data } = await applied((workbook) => {
+      Object.assign(rowWith(workbook.claimWords, 'code', claim.code)!, { reviewer_role: 'a consultant dermatologist', source_url: 'https://example.com/why-flagged' })
+    })
+
+    expect(sorted(data.diff).claimWords).toEqual(diffOf({ updated: [claim.code as string] }))
+    expect(rowWith((await exportLive()).workbook.claimWords, 'code', claim.code)).toMatchObject({ reviewer_role: 'a consultant dermatologist', source_url: 'https://example.com/why-flagged' })
+    expect(await rulesVersion()).toBe(before)
   })
 
   it('does not change when a draft rule is added or edited, because a draft applies to nothing', async () => {
@@ -618,6 +690,7 @@ describe('the contract version', () => {
     ['the 2.0.0 contract, before key_ingredient and strength', '2.0.0'],
     ['the 2.1.0 contract, before the Guides tab', '2.1.0'],
     ['the 2.2.0 contract, before the Reintroductions, Escalations, Responses and Weeks tabs', '2.2.0'],
+    ['the 2.3.0 contract, before reviewer_role, the claim word source_url and the about-a-product escalation', '2.3.0'],
     ['a newer contract', '9.9.9'],
   ])('refuses a file made for %s with 409 CONTRACT_MISMATCH, as a dry run and as an apply, and writes nothing', async (_what, contractVersion) => {
     const live = await exportLive()
@@ -685,6 +758,50 @@ describe('the contract version', () => {
       expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
     }
     expect(await counts()).toEqual(before)
+  })
+
+  /** What a workbook exported at 2.3.0 is: the 2.4.0 export without the reviewer_role columns, the claim word source_url and the about-a-product escalation. */
+  const asExportedAt230 = (workbook: RawWorkbook): RawWorkbook =>
+    edited(workbook, (copy) => {
+      const dropColumn = (tab: RawWorkbook['ingredients'], column: string) => {
+        tab.headers = tab.headers.filter((header) => header !== column)
+        for (const row of tab.rows) delete row[column]
+      }
+      dropColumn(copy.ingredients, 'reviewer_role')
+      dropColumn(copy.claimWords, 'reviewer_role')
+      dropColumn(copy.claimWords, 'source_url')
+      copy.escalations.rows = copy.escalations.rows.filter((row) => row.reason !== 'about-a-product')
+    })
+
+  it('refuses a genuine 2.3.0 workbook, which has no reviewer_role column and no about-a-product escalation, with 409 CONTRACT_MISMATCH and not a 400 for its shape, as a dry run and as an apply', async () => {
+    const live = await exportLive()
+    const old = asExportedAt230(live.workbook)
+    expect(old.ingredients.headers).not.toContain('reviewer_role')
+    const before = await counts()
+
+    for (const dryRun of [true, false]) {
+      const res = await importRaw({ workbook: old, baseVersion: live.catalogVersion, dryRun, file: dryRun ? null : xlsxBytes('two-three-zero'), contractVersion: '2.3.0' })
+
+      expect(res.status).toBe(409)
+      expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
+    }
+    expect(await counts()).toEqual(before)
+  })
+
+  it('refuses a 2.3.0-shaped workbook that says it is 2.4.0 with a 400: the columns and the escalation row it lacks are told as problems, not as a contract mismatch', async () => {
+    const live = await exportLive()
+
+    const res = await importRaw({ workbook: asExportedAt230(live.workbook), baseVersion: live.catalogVersion, dryRun: true, contractVersion: CONTRACT_VERSION })
+
+    expect(res.status).toBe(400)
+    expect(((await errorOf(res)).details as { problems: unknown[] }).problems).toEqual(
+      expect.arrayContaining([
+        { tab: 'ingredients', row: 1, column: 'reviewer_role', rule: 'MISSING_COLUMN' },
+        { tab: 'claimWords', row: 1, column: 'reviewer_role', rule: 'MISSING_COLUMN' },
+        { tab: 'claimWords', row: 1, column: 'source_url', rule: 'MISSING_COLUMN' },
+        { tab: 'escalations', row: 1, column: 'reason', rule: 'ESCALATION_MISSING' },
+      ]),
+    )
   })
 
   it.each(['reintroductions', 'escalations', 'responses', 'weeks'] as const)('refuses a workbook of the current contract version that has no %s tab, with a 400 and not a 409', async (tab) => {
@@ -1202,7 +1319,7 @@ describe('escalations', () => {
     expect(sorted(data.diff).escalations).toEqual(diffOf({ updated: ['near-eyes'] }))
     const live = (await exportLive()).workbook.escalations
     expect(live.rows.filter((row) => row.reason === 'near-eyes')).toEqual([expect.objectContaining({ how_soon: soon, audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })])
-    expect(live.rows).toHaveLength(7)
+    expect(live.rows).toHaveLength(8)
     expect(await rulesVersion()).toBe(version)
   })
 

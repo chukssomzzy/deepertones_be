@@ -7,7 +7,7 @@ import { MemoryWorkbookArchive } from '../../src/providers/workbook-archive/memo
 import { FakeCatalogWorkbookRepository } from '../../src/modules/catalog/catalog.workbook.repository.fake'
 import { CONTRACT_VERSION, type RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
 import { CatalogWorkbookService } from '../../src/modules/catalog/catalog.workbook.service'
-import { allEscalations, allResponses, availability, baseGuides, baseReintroductions, baseWeeks, claimWord, country, day, dayAsDate, ingredient, product, taper, validWorkbook } from '../catalog/workbook.fixture'
+import { allEscalations, allResponses, availability, baseGuides, baseReintroductions, baseWeeks, claimWord, country, day, dayAsDate, ingredient, product, taper, validWorkbook, withReviewerRoles } from '../catalog/workbook.fixture'
 import { writeWorkbookFile } from '../catalog/xlsx'
 import { caseOf, product as shelfProduct, noLabel } from './verdict.fixture'
 import {
@@ -237,6 +237,8 @@ describe('the reference the eval builds from a workbook', () => {
     live.workbook.escalations.rows.push(...allEscalations())
     live.workbook.responses.rows.push(...allResponses())
     live.workbook.weeks.rows.push(...baseWeeks())
+    // The seeded rules the export holds have no reviewer role, which the contract needs of an approved rule since 2.4.0.
+    withReviewerRoles(live.workbook)
     live.workbook.tapers.rows.push(
       taper({ code: 'TPR-ZZ-STEROID-OLD', kind: 'steroid', approved_on: day(-20) }),
       taper({ code: 'TPR-ZZ-STEROID-NEW', kind: 'steroid', approved_on: day(-2) }),

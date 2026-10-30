@@ -137,8 +137,8 @@ export const STATEMENT_ROWS = {
   formulations: 12, // 7
   recommended: 3, // at most 25
   availability: 15, // 6
-  rules: 6, // 16
-  claimWords: 11, // 9
+  rules: 5, // 17
+  claimWords: 9, // 11
   tapers: 9, // 11
   guides: 7, // 13
   reintroductions: 11, // 9
@@ -526,6 +526,7 @@ export class D1CatalogWorkbookRepository {
               clashesWith: sql`excluded.clashes_with`,
               status: sql`excluded.status`,
               approvedBy: sql`excluded.approved_by`,
+              reviewerRole: sql`excluded.reviewer_role`,
               approvedOn: sql`excluded.approved_on`,
               auditedBy: sql`excluded.audited_by`,
               auditedOn: sql`excluded.audited_on`,
@@ -548,8 +549,10 @@ export class D1CatalogWorkbookRepository {
             set: {
               phrase: sql`excluded.phrase`,
               claim: sql`excluded.claim`,
+              sourceUrl: sql`excluded.source_url`,
               status: sql`excluded.status`,
               approvedBy: sql`excluded.approved_by`,
+              reviewerRole: sql`excluded.reviewer_role`,
               approvedOn: sql`excluded.approved_on`,
               auditedBy: sql`excluded.audited_by`,
               auditedOn: sql`excluded.audited_on`,
@@ -834,6 +837,7 @@ export class D1CatalogWorkbookRepository {
       clashesWith: row.clashesWith,
       status: row.status,
       approvedBy: row.approvedBy,
+      reviewerRole: row.reviewerRole,
       approvedOn: dateOf(row.approvedOn),
       auditedBy: row.auditedBy,
       auditedOn: dateOf(row.auditedOn),
@@ -845,8 +849,10 @@ export class D1CatalogWorkbookRepository {
       code: row.code,
       phrase: row.phrase,
       claim: row.claim,
+      sourceUrl: row.sourceUrl,
       status: row.status,
       approvedBy: row.approvedBy,
+      reviewerRole: row.reviewerRole,
       approvedOn: dateOf(row.approvedOn),
       auditedBy: row.auditedBy,
       auditedOn: dateOf(row.auditedOn),

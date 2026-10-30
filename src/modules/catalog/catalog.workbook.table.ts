@@ -42,6 +42,8 @@ export const ingredientRules = sqliteTable('ingredient_rules', {
   clashesWith: text('clashes_with', { mode: 'json' }).$type<IngredientGroup[]>().notNull().default([]),
   status: text('status', { enum: ['draft', 'approved', 'retired'] }).notNull(),
   approvedBy: text('approved_by'),
+  // The role the app shows under "Reviewed by", like the group and clashes_with above: read by the shelf verdict, so a change to it is not a new rules version. Null for a row stored before 2.4.0.
+  reviewerRole: text('reviewer_role'),
   // A calendar day somebody signed on, as the workbook writes it (YYYY-MM-DD), not an instant.
   approvedOn: text('approved_on'),
   auditedBy: text('audited_by'),
@@ -54,8 +56,10 @@ export const claimWords = sqliteTable('claim_words', {
   code: text('code').primaryKey(),
   phrase: text('phrase').notNull(),
   claim: text('claim', { enum: ['lightening'] }).notNull(),
+  sourceUrl: text('source_url'),
   status: text('status', { enum: ['approved', 'retired'] }).notNull(),
   approvedBy: text('approved_by'),
+  reviewerRole: text('reviewer_role'),
   approvedOn: text('approved_on'),
   auditedBy: text('audited_by'),
   auditedOn: text('audited_on'),

@@ -49,6 +49,7 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
     clashesWith: [],
     status: 'approved',
     approvedBy: 'reference seed',
+    reviewerRole: null,
     approvedOn: '2026-10-21',
     auditedBy: null,
     auditedOn: null,

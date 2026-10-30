@@ -23,6 +23,7 @@ const rule = (over: Partial<IngredientRule> = {}): IngredientRule => ({
   clashesWith: [],
   status: 'approved',
   approvedBy: 'Dr A',
+  reviewerRole: null,
   approvedOn: at(-3),
   auditedBy: null,
   auditedOn: null,
