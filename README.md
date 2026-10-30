@@ -465,6 +465,8 @@ shared by every environment. CI keeps it in sync with the `assets/` folder:
    `https://assets.deepertones.com/email/logo.png`).
 2. Merge to `staging`. The `Sync assets` workflow uploads what changed.
 
+Today it holds the email logo (`email/logo.png`) and the share card's label font (`share-card/label.ttf`, Inter Bold under the SIL Open Font License, with its licence beside it as `share-card/label.LICENSE.txt`). A new file type needs a content type in `scripts/assets/plan.ts`.
+
 The sync is idempotent: it records each file's hash in `_sync-manifest.json` in the bucket and uploads only
 files that are new or changed. The first run creates the bucket and attaches the custom domain. It never
 deletes: a file removed from `assets/` is listed as orphaned in the run log and stays in the bucket; delete it

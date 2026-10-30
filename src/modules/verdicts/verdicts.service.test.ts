@@ -1351,11 +1351,13 @@ const amarasBody = (fit: 'ready' | 'not-ready') => ({
   status: 'ready',
   locked: false,
   fit,
+  // #259 A2: the fixed group copy and each product's suggested lines; their words are pinned in verdicts.view.test.ts.
+  groups: expect.any(Array),
   products: [
     fit === 'ready'
-      ? { entryId: 'entry-a', ...PRODUCT_A, group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false }
-      : { entryId: 'entry-a', ...PRODUCT_A, group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false },
-    { entryId: 'entry-b', ...PRODUCT_B, group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false },
+      ? { entryId: 'entry-a', ...PRODUCT_A, group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false, suggest: expect.any(Array) }
+      : { entryId: 'entry-a', ...PRODUCT_A, group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, suggest: expect.any(Array) },
+    { entryId: 'entry-b', ...PRODUCT_B, group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false, suggest: expect.any(Array) },
   ],
   tapers: [STEROID_TAPER_BODY],
 })
@@ -1860,8 +1862,8 @@ describe('VerdictService: the shelf entry\'s product on each verdict product', (
 
   describe('when the view of an entry in the saved verdict no longer resolves (the shelf changed in the moment since it was built)', () => {
     /** What a client is shown of a product whose view is gone: the saved verdict as it was, and nothing of the shelf entry. */
-    const NO_VIEW_A = { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false }
-    const NO_VIEW_B = { entryId: 'entry-b', ...PRODUCT_B, group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false }
+    const NO_VIEW_A = { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false, suggest: expect.any(Array) }
+    const NO_VIEW_B = { entryId: 'entry-b', ...PRODUCT_B, group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false, suggest: expect.any(Array) }
     const noShelfEntry = (product: object) => {
       for (const joined of ['kind', 'product', 'noLabel']) expect(product).not.toHaveProperty(joined)
     }
@@ -1922,12 +1924,13 @@ describe('VerdictService: the shelf entry\'s product on each verdict product', (
       events.published.length = 0
       await watch()
       const snapshot = events.subscribed[0]!.snapshot as unknown as { products: object[]; tapers: object[] }
-      expect(snapshot.products).toEqual([{ entryId: 'entry-a', ...PRODUCT_A, group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false }, {
+      expect(snapshot.products).toEqual([{ entryId: 'entry-a', ...PRODUCT_A, group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false, suggest: expect.any(Array) }, {
         entryId: 'entry-b',
         group: 'likely-the-problem',
         verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' },
         reason: expect.any(String),
         escalate: false,
+        suggest: expect.any(Array),
       }])
       expect(snapshot.tapers).toEqual([STEROID_TAPER_BODY])
     })
@@ -2132,6 +2135,8 @@ const PREVIEW_FRAME_OF_AMARA = (fit: 'ready' | 'not-ready') => ({
     status: 'ready',
     locked: true,
     fit,
+    // #259 A2: the fixed group copy rides on the preview; its words are pinned in verdicts.view.test.ts.
+    groups: expect.any(Array),
     total: 2,
     // Amara's shelf: the serum is the judge's (helping, or undecided while the fit is not ready) and the steroid cream the rules stopped.
     counts: { helping: fit === 'ready' ? 1 : 0, redundant: 0, blocking: 0, conflicting: 0, 'likely-the-problem': 1, 'cant-tell': 0, prescribed: 0, undecided: fit === 'ready' ? 0 : 1 },
@@ -2327,7 +2332,7 @@ describe('VerdictService.watch: a guest follows a stream of the locked preview o
     expect(events.subscribed).toEqual([
       {
         scanId: NGOZI_PREVIEW_KEY,
-        snapshot: { status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...EVERY_GROUP_ZERO, helping: 1, 'likely-the-problem': 1 }, escalates: 0 },
+        snapshot: { status: 'ready', locked: true, fit: 'ready', groups: expect.any(Array), total: 2, counts: { ...EVERY_GROUP_ZERO, helping: 1, 'likely-the-problem': 1 }, escalates: 0 },
       },
     ])
     expectNothingPrivate(events.subscribed[0]!.snapshot)
