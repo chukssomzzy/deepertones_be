@@ -68,6 +68,10 @@ export const AddShelfProductBody = z
   .strictObject({ productId: z.string().min(1).openapi({ description: 'A product id from `GET /api/v1/products/search`.' }) })
   .openapi('AddShelfProductBody')
 
+export const ReplaceShelfEntryBody = z
+  .strictObject({ productId: z.string().min(1).openapi({ description: 'The product the entry really is, from `GET /api/v1/products/search`. Not the entry\'s own product.' }) })
+  .openapi('ReplaceShelfEntryBody')
+
 export const AddShelfProductResponse = z
   .object({
     scanId: z.string().openapi({ description: 'The typed scan made for the add. Follow it with `GET /api/v1/scans/products/{scanId}` or its `/events`.' }),

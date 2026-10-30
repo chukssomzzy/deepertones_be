@@ -17,6 +17,8 @@ const CONTENT_TYPES: Record<string, string> = {
   json: 'application/json',
   txt: 'text/plain; charset=utf-8',
   css: 'text/css; charset=utf-8',
+  // The share card's label font (Images fetches it by URL).
+  ttf: 'font/ttf',
 }
 
 export function contentTypeFor(key: string): string {

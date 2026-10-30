@@ -1,10 +1,11 @@
 import { requireUser } from '../../lib/context'
-import { NotFoundError } from '../../lib/errors'
+import { NotFoundError, ValidationError } from '../../lib/errors'
 import type { ProductCatalogService, ProductSummary } from '../catalog/catalog.service'
+import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import type { NoLabelView, ScanService } from '../scans/scans.service'
 import { STEP_DOWN_LINE_GUEST, STEP_DOWN_LINE_VERIFIED } from './shelf.copy'
 import type { ShelfRepository } from './shelf.repository'
-import type { ShelfEntryRow, ShelfRemovedReason } from './shelf.types'
+import type { ShelfEntryRow, ShelfPublicRemovedReason, ShelfRemovedReason } from './shelf.types'
 
 export type ShelfPolicy = {
   /** The most entries a read returns, the most recently scanned. */
@@ -31,6 +32,9 @@ export type ShelfActiveEntry =
   | { id: string; kind: 'product'; addedAt: Date; productId: string; formulationId: string }
   | { id: string; kind: 'no-label'; addedAt: Date; itemId: string }
 
+/** A removed shelf entry as the routines module reads it: its id and the reason it was removed with (null when none was given). */
+export type ShelfRemovedEntry = { id: string; reason: ShelfRemovedReason | null }
+
 /** What adding a product came to: it was already on the shelf (this is its entry), or a typed scan was started and the entry follows when its item is ready. */
 export type ShelfAddResult = { status: 'exists'; entry: ShelfEntryView } | { status: 'started'; scanId: string; itemId: string }
 
@@ -51,9 +55,12 @@ export type ShelfStepDowns = {
 export type ShelfServiceDeps = {
   repository: ShelfRepository
   /** Asked through its service, never through its repository. */
-  catalog: Pick<ProductCatalogService, 'productSummaries'>
+  catalog: Pick<ProductCatalogService, 'productSummaries' | 'namedProduct'>
   scans: Pick<ScanService, 'noLabelViews' | 'createTyped'>
   stepDowns: ShelfStepDowns
+  /** Where the swap records its wrong-match report: the verdicts' report repository, wired in the container so shelf does not import verdicts. */
+  wrongMatches: { record(report: { id: string; profileId: string; entryId: string; oldProductId: string | null; newProductId: string }, now: Date): Promise<void> }
+  opsAlerts: Pick<OpsAlertsService, 'raise'>
   now?: () => Date
 }
 
@@ -63,9 +70,11 @@ export type ShelfServiceDeps = {
  */
 export class ShelfService {
   private readonly repository: ShelfRepository
-  private readonly catalog: Pick<ProductCatalogService, 'productSummaries'>
+  private readonly catalog: Pick<ProductCatalogService, 'productSummaries' | 'namedProduct'>
   private readonly scans: Pick<ScanService, 'noLabelViews' | 'createTyped'>
   private readonly stepDowns: ShelfStepDowns
+  private readonly wrongMatches: ShelfServiceDeps['wrongMatches']
+  private readonly opsAlerts: Pick<OpsAlertsService, 'raise'>
   private readonly now: () => Date
 
   constructor(deps: ShelfServiceDeps) {
@@ -73,6 +82,8 @@ export class ShelfService {
     this.catalog = deps.catalog
     this.scans = deps.scans
     this.stepDowns = deps.stepDowns
+    this.wrongMatches = deps.wrongMatches
+    this.opsAlerts = deps.opsAlerts
     this.now = deps.now ?? (() => new Date())
   }
 
@@ -124,6 +135,24 @@ export class ShelfService {
   }
 
   /**
+   * The profile's removed entries as narrow rows, the earliest removal first, so the routines module can tell which step-downs go on after their product left the shelf.
+   * By the given profile with no session (a build is a job), not capped, and not resolved: only the removal matters, not whether the product still resolves. The reason is the
+   * one the entry was first removed with.
+   */
+  async removedEntriesFor(profileId: string): Promise<ShelfRemovedEntry[]> {
+    return (await this.repository.removedFor(profileId)).map((row) => ({ id: row.id, reason: row.removedReason }))
+  }
+
+  /**
+   * The catalog product of each of these removed entries of the given profile, by entry id, so a step-down for a removed product can be matched to the same product put back on
+   * the shelf as a new entry. By the profile given with no session. An id that is not removed, another profile's, or a no-label entry (it has no product) is left out.
+   */
+  async removedProductIdsFor(profileId: string, entryIds: string[]): Promise<Map<string, string>> {
+    const asked = new Set(entryIds)
+    return new Map((await this.repository.removedFor(profileId)).flatMap((row): [string, string][] => (asked.has(row.id) && row.productId !== null ? [[row.id, row.productId]] : [])))
+  }
+
+  /**
    * Adds a named catalog product, picked from search, to the caller's shelf. One already on it is answered with its entry, as `list`
    * shows it, and nothing else happens: no scan, no allowance used, no model, no push. Otherwise a typed scan is started (see
    * `ScanService.createTyped`, which looks the product up first, so an unknown one is PRODUCT_NOT_FOUND, and takes the daily allowance
@@ -141,6 +170,37 @@ export class ShelfService {
     const [entry] = row ? await this.viewsOf([row]) : []
     if (entry) return { status: 'exists', entry }
     return { status: 'started', ...(await this.scans.createTyped({ productId, clientIp })) }
+  }
+
+  /**
+   * "This isn't the right product": takes the caller's entry off the shelf as the wrong match and adds the product they name in its place. Checked in this order, and nothing is
+   * removed by any of them: the entry is the caller's and active (404 `SHELF_ENTRY_NOT_FOUND`, which does not tell unknown, another profile's and already removed apart); the product is
+   * not the entry's own (400 `VALIDATION_FAILED`: that is not a swap); the catalog offers it (404 `PRODUCT_NOT_FOUND`, asked here so a bad id never takes a product off the shelf).
+   * Then the entry is removed with the reason `wrong-product`, which only this method writes; a wrong-match report is recorded; `wrong-match-report` is raised once it is written; and the product is added by
+   * `add`, so its answer, its daily limit and its research charging are the search add's.
+   *
+   * The report is in the verdicts module's table and so not in the removal's batch: it is written after the removal and is best-effort, a failure logged by the ids only and the swap going
+   * on (the shelf is the person's answer; the report is only for the team). An add that fails after the removal (429 daily limit, a provider error) leaves the removal and the report
+   * standing and its error is the caller's: the wrong product stays off the shelf. An entry with no label (no product id) may be swapped; its report has no old product.
+   */
+  async replace(entryId: string, productId: string, clientIp: string): Promise<ShelfAddResult> {
+    const { profileId } = requireUser()
+    const [row] = await this.repository.activeByIds(profileId, [entryId])
+    if (!row) throw new NotFoundError('SHELF_ENTRY_NOT_FOUND', 'Shelf entry not found')
+    if (row.productId === productId) throw new ValidationError('VALIDATION_FAILED', 'That is already the product on this entry')
+    await this.catalog.namedProduct(productId)
+
+    const now = this.now()
+    // One removed between the read and here is gone: told the same way, and neither reported nor swapped.
+    if ((await this.repository.remove(profileId, entryId, 'wrong-product', now)) !== 'removed') throw new NotFoundError('SHELF_ENTRY_NOT_FOUND', 'Shelf entry not found')
+    try {
+      await this.wrongMatches.record({ id: crypto.randomUUID(), profileId, entryId, oldProductId: row.productId, newProductId: productId }, now)
+      // Raised only for a report that was written: an alert that points at a row that is not there would send the team looking for nothing.
+      await this.opsAlerts.raise('wrong-match-report')
+    } catch {
+      console.error({ outcome: 'wrong-match-report-failed', profileId, entryId, productId })
+    }
+    return this.add(productId, clientIp)
   }
 
   /** Rows as views, the one path `list`, `entry`, `add` and `viewsFor` share; see `list` for how a row that no longer resolves is treated. */
@@ -166,7 +226,7 @@ export class ShelfService {
   }
 
   /** Takes the caller's entry off the shelf, with the reason if they gave one. Removing it again succeeds and changes nothing; another profile's entry is as unknown as one that never existed. */
-  async remove(entryId: string, reason?: ShelfRemovedReason): Promise<void> {
+  async remove(entryId: string, reason?: ShelfPublicRemovedReason): Promise<void> {
     const { profileId } = requireUser()
     const result = await this.repository.remove(profileId, entryId, reason ?? null, this.now())
     if (result === 'not-found') throw new NotFoundError('SHELF_ENTRY_NOT_FOUND', 'Shelf entry not found')
@@ -179,7 +239,7 @@ export class ShelfService {
    * is no reason to refuse: the removal is made with no warnings, and only the ids are logged. A guest is warned too, but with no taper code and a self-contained line,
    * since the guest is served only the locked verdict preview (see `ShelfStepDownWarning`).
    */
-  async removeMany(entryIds: string[], reason?: ShelfRemovedReason): Promise<ShelfRemoveManyView> {
+  async removeMany(entryIds: string[], reason?: ShelfPublicRemovedReason): Promise<ShelfRemoveManyView> {
     const { profileId, status } = requireUser()
     let stops = new Map<string, string>()
     try {

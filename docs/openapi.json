@@ -1125,6 +1125,20 @@
         ],
         "additionalProperties": false
       },
+      "ReplaceShelfEntryBody": {
+        "type": "object",
+        "properties": {
+          "productId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The product the entry really is, from `GET /api/v1/products/search`. Not the entry's own product."
+          }
+        },
+        "required": [
+          "productId"
+        ],
+        "additionalProperties": false
+      },
       "RemoveShelfEntryBody": {
         "type": "object",
         "properties": {
@@ -1180,6 +1194,13 @@
                 ],
                 "description": "`not-ready` when the goal-fit check has not answered yet: the products it would decide are shown as kept for now, and it is tried again."
               },
+              "groups": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ShelfVerdictGroup"
+                },
+                "description": "All eight headings in the order the screen shows them, each with fixed words and its product count (0 where empty; the app hides the zeros). Copy awaiting the owner's sign-off."
+              },
               "total": {
                 "type": "integer",
                 "description": "How many skin-care products the verdict holds."
@@ -1233,6 +1254,7 @@
               "status",
               "locked",
               "fit",
+              "groups",
               "total",
               "counts",
               "escalates"
@@ -1262,6 +1284,13 @@
                 ],
                 "description": "`not-ready` when the goal-fit check has not answered yet: the products it would decide are shown as kept for now, and it is tried again."
               },
+              "groups": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ShelfVerdictGroup"
+                },
+                "description": "All eight headings in the order the screen shows them, each with fixed words and its product count (0 where empty; the app hides the zeros). Copy awaiting the owner's sign-off."
+              },
               "products": {
                 "type": "array",
                 "items": {
@@ -1281,10 +1310,52 @@
               "status",
               "locked",
               "fit",
+              "groups",
               "products",
               "tapers"
             ]
           }
+        ]
+      },
+      "ShelfVerdictGroup": {
+        "type": "object",
+        "properties": {
+          "group": {
+            "type": "string",
+            "enum": [
+              "prescribed",
+              "likely-the-problem",
+              "conflicting",
+              "cant-tell",
+              "helping",
+              "redundant",
+              "blocking",
+              "undecided"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "description": "The heading, e.g. \"Helping\". `undecided` is shown as \"Still checking\"."
+          },
+          "subtitle": {
+            "type": "string"
+          },
+          "intro": {
+            "type": "string",
+            "description": "One or two plain sentences about the products under the heading."
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "How many products are under it; 0 where there are none."
+          }
+        },
+        "required": [
+          "group",
+          "title",
+          "subtitle",
+          "intro",
+          "count"
         ]
       },
       "ShelfVerdictProduct": {
@@ -1447,6 +1518,14 @@
               "photograph-back-label"
             ],
             "description": "Only on a `cant-tell` product: what to do to get it read."
+          },
+          "suggest": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "One or more (usually one to three) fixed lines on what to do with the product, worked out from `verdict` alone (and `escalate`, and the `cant-tell` group). Copy awaiting the owner's sign-off."
           }
         },
         "required": [
@@ -1454,7 +1533,8 @@
           "group",
           "verdict",
           "reason",
-          "escalate"
+          "escalate",
+          "suggest"
         ]
       },
       "ShelfVerdictAction": {
@@ -1598,6 +1678,28 @@
           "whatToExpect",
           "seeAProfessionalIf"
         ]
+      },
+      "VerdictReport": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The report's id."
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "VerdictReportBody": {
+        "type": "object",
+        "properties": {
+          "note": {
+            "type": "string",
+            "description": "What looks wrong, in the person's own words. Trimmed; at most 500 characters once trimmed (more is 400 `VALIDATION_FAILED`); empty or spaces only is no note. Only the team reads it."
+          }
+        },
+        "additionalProperties": false
       },
       "Routine": {
         "oneOf": [
@@ -3814,6 +3916,76 @@
           "givenAt",
           "withdrawnAt",
           "current"
+        ]
+      },
+      "FaceShareConsentGivenResponse": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "givenAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "version",
+          "givenAt"
+        ]
+      },
+      "SetFaceShareConsentBody": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "The version of the face share consent wording the user agreed to. Only the current version is accepted."
+          }
+        },
+        "required": [
+          "version"
+        ]
+      },
+      "FaceShareConsentResponse": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "givenAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "withdrawnAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "current": {
+            "type": "boolean",
+            "description": "True while the consent is for the current wording and has not been withdrawn: the only consent a share accepts."
+          }
+        },
+        "required": [
+          "version",
+          "givenAt",
+          "withdrawnAt",
+          "current"
+        ]
+      },
+      "ShareFaceTimelineBody": {
+        "type": "object",
+        "properties": {
+          "afterScanId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The face scan to show as \"after\": a later ready scan of the current goal, with a front photo, at least 14 days after day one."
+          }
+        },
+        "required": [
+          "afterScanId"
         ]
       },
       "ProductSearch": {
@@ -7853,6 +8025,168 @@
         }
       }
     },
+    "/api/v1/me/shelf/{entryId}/replace": {
+      "post": {
+        "operationId": "replaceShelfEntry",
+        "tags": [
+          "Shelf"
+        ],
+        "summary": "This isn't the right product: swap an entry for the right one",
+        "description": "Guests included. Body `{ productId }`, a named product from `GET /api/v1/products/search`. The entry is taken off the shelf (with the removed reason `wrong-product`, which no other route writes), a wrong-match report is stored for the team, and the product is then added exactly as `POST /api/v1/me/shelf` adds it, with the same answers and the same daily limit: 200 with the entry when the right product is already on the shelf (the wrong one is still removed), or 202 with `{ scanId, itemId }` of a `typed` scan. These are checked first, and none of them removes anything: 404 `SHELF_ENTRY_NOT_FOUND` for an entry that is unknown, removed or another profile's (not told apart), 400 `VALIDATION_FAILED` when `productId` is the entry's own product (that is not a swap), and 404 `PRODUCT_NOT_FOUND` for an unknown or unnamed product. If the add then fails (429 `SCAN_DAILY_LIMIT`, or a provider error), the removal and the report stand and the error is answered as `POST /api/v1/me/shelf` answers it: the wrong product stays off the shelf. That entry is then gone, so asking `/replace` for it again is 404 `SHELF_ENTRY_NOT_FOUND`: after a removal whose add failed, the app should add the right product with `POST /api/v1/me/shelf`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The shelf entry's `id`, from `GET /api/v1/me/shelf`."
+            },
+            "required": true,
+            "description": "The shelf entry's `id`, from `GET /api/v1/me/shelf`.",
+            "name": "entryId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceShelfEntryBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The right product was already on the shelf: its entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ShelfEntry"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "A typed scan was started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AddShelfProductResult"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/me/verdict": {
       "get": {
         "operationId": "getShelfVerdict",
@@ -8003,6 +8337,177 @@
           },
           "503": {
             "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/verdict/products/{entryId}/reports": {
+      "post": {
+        "operationId": "reportVerdictMistake",
+        "tags": [
+          "Verdict"
+        ],
+        "summary": "Tell the team a product's verdict looks wrong",
+        "description": "For a signed-up account. Stores a report for the team to read and changes nothing the person sees: the verdict stays as it is. The product must be one of the verdict the person is served now, which is a ready verdict built from the shelf, answers, goal and rules as they are now: a pending or out-of-date verdict has none, so every entry is 404 `VERDICT_PRODUCT_NOT_FOUND`. The checks run in this order: 401 without a session; 400 `VALIDATION_FAILED` for a malformed body (a field other than `note`, or a `note` that is not text); 403 `SIGNUP_REQUIRED` for a guest; 400 `VALIDATION_FAILED` for a `note` over 500 characters once trimmed; then 404. Send `{}` to report with no note. 201 with the new report's `id`; 200 with the same `id` when the same product was already reported on the same verdict, which replaces its note.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "The shelf entry the report is about: the `entryId` of a product of `GET /api/v1/me/verdict`."
+            },
+            "required": true,
+            "description": "The shelf entry the report is about: the `entryId` of a product of `GET /api/v1/me/verdict`.",
+            "name": "entryId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerdictReportBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The product had been reported on this verdict: its report was updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/VerdictReport"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The report was stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/VerdictReport"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
             "content": {
               "application/json": {
                 "schema": {
@@ -10318,6 +10823,386 @@
           },
           "500": {
             "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/face-share-consent": {
+      "put": {
+        "operationId": "setFaceShareConsent",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "Say yes to sharing a before-and-after card",
+        "description": "The consent covers sharing a before-and-after card of the face photos, made by the server and never stored. For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. The consent belongs to the active profile. Send `{ version }`, the version of the consent wording the user agreed to: only the current one is accepted, any other is 400 `FACE_SHARE_CONSENT_VERSION_MISMATCH` with `details.current`. It is asked once and remembered. Giving consent again, or after a withdrawal, is 200 and starts it afresh.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFaceShareConsentBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The consent as given",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/FaceShareConsentGivenResponse"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getFaceShareConsent",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "The face share consent this profile gave",
+        "description": "The consent covers sharing a before-and-after card of the face photos, made by the server and never stored. For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. The consent belongs to the active profile. A withdrawn consent is still shown, with `withdrawnAt` and `current` false, as is one for an older wording. 404 `FACE_SHARE_CONSENT_NOT_FOUND` until the profile has given one.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The consent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/FaceShareConsentResponse"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "withdrawFaceShareConsent",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "Take back the face share consent",
+        "description": "The consent covers sharing a before-and-after card of the face photos, made by the server and never stored. For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. The consent belongs to the active profile. Stamps the time and keeps the record. 204 again when already withdrawn, and 204 when there was never any consent. After it, the next share asks again.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The consent is withdrawn"
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/face-timeline/share": {
+      "post": {
+        "operationId": "shareFaceTimeline",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "Make the before-and-after card to share",
+        "description": "Makes a 1080 x 1920 card of the user's day one face photo and the one in `afterScanId`, labelled \"Day 1\" and \"Day N\", and answers it as a PNG with `Cache-Control: private, no-store`. The photos are only resized, never edited, and the card is made for this request and written nowhere by this service. Every goal may share, the fairer goal included. For a signed-up account, checked in this order: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `SHARE_CONSENT_REQUIRED` without a current face share consent, 409 `NO_DAY_ONE_PHOTO` when the current goal has no day one photo yet, 404 `FACE_SCAN_NOT_FOUND` when `afterScanId` is not a later ready scan of the same goal run with a front photo (an unknown scan, another profile's, day one itself and the rest are not told apart), 409 `SHARE_TOO_EARLY` when it is less than 14 days after day one in the user's own calendar days (N is the days since day one plus one). 503 `SHARE_UNAVAILABLE` when the card cannot be made right now, whatever the cause; nothing is recorded then, and trying again later is fine. A card that is made is recorded as one share. 429 `RATE_LIMITED` past 10 requests a minute per user.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShareFaceTimelineBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The card",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
             "content": {
               "application/json": {
                 "schema": {

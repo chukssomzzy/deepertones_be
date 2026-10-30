@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import { chunked, queryByIds, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
@@ -29,6 +29,15 @@ export class D1ShelfRepository {
       .orderBy(desc(profileProducts.lastScannedAt), asc(profileProducts.id))
       .$dynamic()
     return limit === undefined ? query : query.limit(limit)
+  }
+
+  /** The profile's soft-removed entries as stored, the earliest removal first (the same moment by id). Not capped: the routines module reads every one to see which step-downs go on. */
+  async removedFor(profileId: string): Promise<ShelfEntryRow[]> {
+    return this.db
+      .select()
+      .from(profileProducts)
+      .where(and(eq(profileProducts.profileId, profileId), isNotNull(profileProducts.removedAt)))
+      .orderBy(asc(profileProducts.removedAt), asc(profileProducts.id))
   }
 
   /** The profile's entries among these ids that are not removed, by id; an id that is unknown, removed or another profile's is left out. Not capped, however many ids are asked for. */

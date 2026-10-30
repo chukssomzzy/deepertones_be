@@ -15,6 +15,13 @@ export class FakeShelfRepository implements ShelfRepository {
       .map((row) => ({ ...row }))
   }
 
+  async removedFor(profileId: string): Promise<ShelfEntryRow[]> {
+    return this.store.rows
+      .filter((row) => row.profileId === profileId && row.removedAt !== null)
+      .sort((a, b) => a.removedAt!.getTime() - b.removedAt!.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((row) => ({ ...row }))
+  }
+
   async activeByIds(profileId: string, entryIds: string[]): Promise<ShelfEntryRow[]> {
     const asked = new Set(entryIds)
     return this.store.rows

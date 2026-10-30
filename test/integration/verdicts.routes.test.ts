@@ -18,6 +18,7 @@ import { MemoryEmailSender } from '../../src/providers/email/memory.email'
 import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
+import { FORBIDDEN_WORDING } from '../../src/modules/routines/routines.wording'
 import { applied, code, ruleRow, taperRow, word } from './admin.catalog.support'
 
 // GET /api/v1/me/verdict (spec #171, D2c) through the Worker's public surface: the typed client for the routes that already exist, the real entrypoint and real
@@ -67,6 +68,7 @@ const quietQueue = { send: async () => {}, sendBatch: async () => {} } as unknow
 const parseQueued: unknown[] = []
 const parseQueue = { send: async (body: unknown) => void parseQueued.push(body), sendBatch: async () => {} } as unknown as Queue
 const otpQueued: unknown[] = []
+const emailQueued: unknown[] = []
 const WORKER_ENV = {
   ...env,
   OTP_CHANNELS: 'email',
@@ -76,6 +78,7 @@ const WORKER_ENV = {
   VERDICTS_QUEUE: verdictsQueue,
   SCAN_ITEMS_QUEUE: quietQueue,
   PARSE_SAFETY_QUEUE: parseQueue,
+  EMAIL_QUEUE: { send: async (body: unknown) => void emailQueued.push(body), sendBatch: async () => {} } as unknown as Queue,
   PUSH_DELIVERY_QUEUE: quietQueue,
 }
 const ORIGIN = 'http://deepertones.test'
@@ -90,6 +93,7 @@ afterEach(() => {
   verdictsQueued.length = 0
   otpQueued.length = 0
   parseQueued.length = 0
+  emailQueued.length = 0
 })
 
 const runSalt = String(Math.floor(Math.random() * 1e6))
@@ -121,13 +125,22 @@ type PublicProduct = {
   escalate: boolean
   sameJobAs?: string
   nudge?: string
+  suggest: string[]
 }
 type PublicTaper = { code: string; kind: string; schedule: { fromWeek: number; toWeek: number; frequency: string }[]; whatToExpect: string; seeAProfessionalIf: string }
-type ReadyView = { status: 'ready'; locked: false; fit: 'ready' | 'not-ready'; products: PublicProduct[]; tapers: PublicTaper[] }
+type ReadyView = { status: 'ready'; locked: false; fit: 'ready' | 'not-ready'; groups: GroupEntry[]; products: PublicProduct[]; tapers: PublicTaper[] }
 type Groups = { helping: number; redundant: number; blocking: number; conflicting: number; 'likely-the-problem': number; 'cant-tell': number; prescribed: number; undecided: number }
-type LockedView = { status: 'ready'; locked: true; fit: 'ready' | 'not-ready'; total: number; counts: Groups; escalates: number }
+type LockedView = { status: 'ready'; locked: true; fit: 'ready' | 'not-ready'; groups: GroupEntry[]; total: number; counts: Groups; escalates: number }
 type VerdictBody = { status: 'pending' } | ReadyView | LockedView
 const NO_GROUPS: Groups = { helping: 0, redundant: 0, blocking: 0, conflicting: 0, 'likely-the-problem': 0, 'cant-tell': 0, prescribed: 0, undecided: 0 }
+// #259 A2: every ready verdict also carries `groups` (the screen's headings, fixed copy) and every product `suggest` (what to do, fixed lines). The tests below that
+// compare a whole body say only that they are there; what they hold is pinned by the tests of their own further down and by verdicts.view.test.ts.
+const GROUP_ORDER = ['likely-the-problem', 'conflicting', 'cant-tell', 'blocking', 'redundant', 'helping', 'prescribed', 'undecided'] as const
+const SUGGEST = { suggest: expect.any(Array) }
+const GROUPS = { groups: expect.any(Array) }
+type GroupEntry = { group: string; title: string; subtitle: string; intro: string; count: number }
+const gateTrips = (text: string) => FORBIDDEN_WORDING.filter(({ pattern }) => pattern.test(text)).map(({ code: reason }) => reason)
+const countsByGroup = (groups: GroupEntry[]) => Object.fromEntries(groups.map(({ group, count }) => [group, count]))
 
 // --- people: a guest of one install, and the sign-in that makes the guest an account ---
 
@@ -429,7 +442,8 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
       status: 'ready',
       locked: false,
       fit: 'ready',
-      products: [{ entryId, ...shows(entryId), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false }],
+      ...GROUPS,
+      products: [{ entryId, ...shows(entryId), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST }],
       tapers: [],
     })
     expect(await dataOf(await getVerdict(guest))).toEqual(view)
@@ -451,20 +465,20 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
     await buildQueued(guest, { [twin]: { label: 'redundant', sameJobAs: helping } })
 
     const view = await dataOf<ReadyView>(await getVerdict(guest))
-    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
     expect(view).toMatchObject({ status: 'ready', locked: false, fit: 'ready' })
     const byId = new Map(view.products.map((product) => [product.entryId, product]))
     expect([...byId.keys()].sort()).toEqual([steroid, mercury, helping, twin, unlabelled].sort())
 
     // A steroid stops with its kind's step-down, named by the template's code, with no escalation.
-    expect(byId.get(steroid)).toEqual({ entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false })
+    expect(byId.get(steroid)).toEqual({ entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false, ...SUGGEST })
     // Mercury stops at once, with no step-down, and routes to a professional.
-    expect(byId.get(mercury)).toEqual({ entryId: mercury, ...shows(mercury), group: 'likely-the-problem', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: true })
+    expect(byId.get(mercury)).toEqual({ entryId: mercury, ...shows(mercury), group: 'likely-the-problem', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: true, ...SUGGEST })
     // The judge's words are the reason as given, and a redundant product names the product that stays and does its job.
-    expect(byId.get(helping)).toEqual({ entryId: helping, ...shows(helping), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false })
-    expect(byId.get(twin)).toEqual({ entryId: twin, ...shows(twin), group: 'redundant', verdict: { kind: 'drop' }, reason: 'Reason: redundant.', escalate: false, sameJobAs: helping })
+    expect(byId.get(helping)).toEqual({ entryId: helping, ...shows(helping), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST })
+    expect(byId.get(twin)).toEqual({ entryId: twin, ...shows(twin), group: 'redundant', verdict: { kind: 'drop' }, reason: 'Reason: redundant.', escalate: false, sameJobAs: helping, ...SUGGEST })
     // A product nothing could be read from is set aside with the nudge to photograph the back label.
-    expect(byId.get(unlabelled)).toEqual({ entryId: unlabelled, ...shows(unlabelled), group: 'cant-tell', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: false, nudge: 'photograph-back-label' })
+    expect(byId.get(unlabelled)).toEqual({ entryId: unlabelled, ...shows(unlabelled), group: 'cant-tell', verdict: { kind: 'drop' }, reason: expect.any(String), escalate: false, nudge: 'photograph-back-label', ...SUGGEST })
     for (const product of view.products) expect(product.reason.length).toBeGreaterThan(0)
 
     // Only the template a stopped product uses comes with it (taperRow's schedule is '1-2: alternate-days; 3-4: weekly; 5: stop').
@@ -505,6 +519,94 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
   })
 })
 
+describe('GET /api/v1/me/verdict: the groups and the suggested lines of the full verdict (#259 A2)', () => {
+  /** A member whose shelf holds a steroid cream, a mercury cream, a serum, its twin and a tub with no label, and whose verdict has been built. Answers the entry ids. */
+  const builtMemberShelf = async () => {
+    const guest = await newMember()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    const steroid = await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
+    const mercury = await onShelf(guest, [...CLEAN, MERCURY_INGREDIENT])
+    const helping = await onShelf(guest)
+    const twin = await onShelf(guest)
+    const unlabelled = await noLabelOnShelf(guest, 'moisturise')
+    await getVerdict(guest)
+    await buildQueued(guest, { [twin]: { label: 'redundant', sameJobAs: helping } })
+    return { guest, steroid, mercury, helping, twin, unlabelled }
+  }
+
+  it('lists all eight groups in the owner\'s order with the number of products in each, the empty ones at 0', async () => {
+    const { guest } = await builtMemberShelf()
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    expect(view.groups.map(({ group }) => group)).toEqual([...GROUP_ORDER])
+    // steroid cream and mercury cream (likely-the-problem), the serum (helping), its twin (redundant), the tub nothing could be read from (cant-tell).
+    expect(countsByGroup(view.groups)).toEqual({ ...NO_GROUPS, 'likely-the-problem': 2, helping: 1, redundant: 1, 'cant-tell': 1 })
+    expect(countsByGroup(view.groups)).toEqual(Object.fromEntries(GROUP_ORDER.map((group) => [group, view.products.filter((product) => product.group === group).length])))
+  })
+
+  it('gives each group its title, subtitle and intro as fixed words, the same on every ask, with titles and subtitles as the owner\'s screen has them', async () => {
+    const { guest } = await builtMemberShelf()
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    for (const entry of view.groups) {
+      expect(Object.keys(entry).sort(), entry.group).toEqual(['count', 'group', 'intro', 'subtitle', 'title'])
+      for (const text of [entry.title, entry.subtitle, entry.intro]) expect(text.trim().length, entry.group).toBeGreaterThan(0)
+      for (const text of [entry.title, entry.subtitle, entry.intro]) expect(gateTrips(text), `${entry.group}: "${text}"`).toEqual([])
+    }
+    const byGroup = new Map(view.groups.map((entry) => [entry.group, entry]))
+    expect(byGroup.get('helping')).toMatchObject({ title: 'Helping', subtitle: 'Working toward your goal' })
+    expect(byGroup.get('redundant')).toMatchObject({ title: 'Redundant', subtitle: 'Doing the same job as another' })
+    expect(byGroup.get('blocking')).toMatchObject({ title: 'Blocking your goal', subtitle: 'Holding your goal back' })
+    expect(byGroup.get('conflicting')).toMatchObject({ title: 'Conflicting', subtitle: "Don't work well together" })
+    expect(byGroup.get('likely-the-problem')).toMatchObject({ title: 'Likely the problem', subtitle: "What's causing trouble" })
+    expect(byGroup.get('undecided')).toMatchObject({ title: 'Still checking' })
+    expect(await dataOf<ReadyView>(await getVerdict(guest))).toEqual(view)
+  })
+
+  it('suggests what to do with each product from its verdict: keep, step down by its kind, stop now (with a professional when it escalates), and photograph the back label of a can\'t-tell one', async () => {
+    const { guest, steroid, mercury, helping, twin, unlabelled } = await builtMemberShelf()
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    const lines = (entryId: string) => view.products.find((product) => product.entryId === entryId)!.suggest
+    for (const product of view.products) {
+      expect(product.suggest.length, product.group).toBeGreaterThanOrEqual(1)
+      expect(product.suggest.length, product.group).toBeLessThanOrEqual(3)
+      for (const line of product.suggest) {
+        expect(line.trim().length).toBeGreaterThan(0)
+        expect(gateTrips(line), `"${line}"`).toEqual([])
+      }
+    }
+    expect(lines(helping)).toHaveLength(1)
+    // The steroid is stopped by its step-down: named by its kind, and never stopped suddenly.
+    expect(lines(steroid).join(' ')).toMatch(/steroid/i)
+    expect(lines(steroid).join(' ')).toMatch(/\b(?:never|don't|do not)\b[^.]*\b(?:suddenly|abruptly|all at once)\b/i)
+    // Mercury is stopped at once and goes to a professional; the redundant twin is stopped at once and does not.
+    expect(lines(mercury).join(' ')).toMatch(/\bstop\b/i)
+    expect(lines(mercury).join(' ')).toMatch(/professional/i)
+    expect(lines(twin).join(' ')).toMatch(/\bstop\b/i)
+    expect(lines(twin).join(' ')).not.toMatch(/professional/i)
+    // The tub nothing could be read from is asked to be photographed; no other product is.
+    expect(lines(unlabelled).join(' ')).toMatch(/photograph/i)
+    for (const other of [steroid, mercury, helping, twin]) expect(lines(other).join(' ')).not.toMatch(/photograph/i)
+  })
+
+  it('answers pending with no groups for a member whose verdict is not built yet', async () => {
+    const guest = await newMember()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    await onShelf(guest)
+
+    const body = await dataOf<Record<string, unknown>>(await getVerdict(guest))
+
+    expect(body).toEqual({ status: 'pending' })
+    expect(body).not.toHaveProperty('groups')
+  })
+})
+
 describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict product', () => {
   it('gives each product exactly the kind and the product or noLabel that GET /me/shelf/{entryId} gives for its entry, so the verdict reads without a second call', async () => {
     const guest = await newMember()
@@ -534,7 +636,7 @@ describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict pro
     expect(byId.get(unlabelled)).toMatchObject({ kind: 'no-label', noLabel: { purpose: 'moisturise', source: 'market-vendor', usedFor: '6-months-2-years', description: 'A tub from the market' } })
     expect(byId.get(unlabelled)).not.toHaveProperty('product')
     // The body has the same top-level shape as before: the product's fields sit on each product, not beside the verdict.
-    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
   })
 
   it('still gives only the fields it names: the product adds none of how the rules reached a verdict', async () => {
@@ -547,7 +649,7 @@ describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict pro
 
     const [item] = (await dataOf<ReadyView>(await getVerdict(guest))).products
 
-    expect(Object.keys(item!).sort()).toEqual(['entryId', 'escalate', 'group', 'kind', 'product', 'reason', 'verdict'])
+    expect(Object.keys(item!).sort()).toEqual(['entryId', 'escalate', 'group', 'kind', 'product', 'reason', 'suggest', 'verdict'])
   })
 
   it('reads the product when it is asked, with no new build: it is not what the verdict was built from', async () => {
@@ -612,12 +714,33 @@ describe('GET /api/v1/me/verdict: a guest is given the locked preview, never the
       // steroid cream and mercury cream (likely-the-problem), the serum (helping), its twin (redundant), the tub nothing could be read from (cant-tell).
       total: 5,
       counts: { ...NO_GROUPS, helping: 1, redundant: 1, 'likely-the-problem': 2, 'cant-tell': 1 },
+      ...GROUPS,
       // Only the mercury cream routes to a professional; the guest is told how many, never which.
       escalates: 1,
     })
-    expect(Object.keys(body.data).sort()).toEqual(['counts', 'escalates', 'fit', 'locked', 'status', 'total'])
+    expect(Object.keys(body.data).sort()).toEqual(['counts', 'escalates', 'fit', 'groups', 'locked', 'status', 'total'])
     expect(Object.keys(body.data.counts).sort()).toEqual(Object.keys(NO_GROUPS).sort())
     for (const field of ['products', 'tapers', 'entryId', 'reason', 'verdict']) expect(raw).not.toContain(`"${field}"`)
+  })
+
+  it('gives the preview the same eight groups as the full verdict, in the owner\'s order, with counts equal to `counts`, and no product, reason or line of advice', async () => {
+    const guest = await builtShelf()
+
+    const res = await getVerdict(guest)
+
+    const preview = await dataOf<LockedView>(res)
+    expect(preview.groups.map(({ group }) => group)).toEqual([...GROUP_ORDER])
+    expect(countsByGroup(preview.groups)).toEqual(preview.counts)
+    expect(countsByGroup(preview.groups)).toEqual({ ...NO_GROUPS, helping: 1, redundant: 1, 'likely-the-problem': 2, 'cant-tell': 1 })
+    for (const entry of preview.groups) {
+      expect(Object.keys(entry).sort(), entry.group).toEqual(['count', 'group', 'intro', 'subtitle', 'title'])
+      for (const text of [entry.title, entry.subtitle, entry.intro]) expect(gateTrips(text), `${entry.group}: "${text}"`).toEqual([])
+    }
+    expect(JSON.stringify(preview)).not.toContain('suggest')
+    // After signing up the same words are on the full verdict.
+    await guest.signUp()
+    const full = await dataOf<ReadyView>(await getVerdict(guest))
+    expect(full.groups).toEqual(preview.groups)
   })
 
   it('shows nothing a member of the same profile is shown: no entry id, product name, brand, reason, step-down or word of the rules appears anywhere in the guest\'s body', async () => {
@@ -653,8 +776,25 @@ describe('GET /api/v1/me/verdict: a guest is given the locked preview, never the
       fit: 'not-ready',
       total: 2,
       counts: { ...NO_GROUPS, undecided: 1, 'likely-the-problem': 1 },
+      ...GROUPS,
       escalates: 0,
     })
+  })
+
+  it('counts the products the judge has not decided under Still checking, on the groups of the preview as well as in `counts`', async () => {
+    const guest = await newGuest()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    await onShelf(guest)
+    await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
+    await getVerdict(guest)
+    await buildWithFitFailing(guest)
+
+    const preview = await dataOf<LockedView>(await getVerdict(guest))
+
+    expect(preview.fit).toBe('not-ready')
+    expect(countsByGroup(preview.groups)).toEqual({ ...NO_GROUPS, undecided: 1, 'likely-the-problem': 1 })
+    expect(preview.groups.find(({ group }) => group === 'undecided')!.title).toBe('Still checking')
   })
 })
 
@@ -669,7 +809,7 @@ describe('GET /api/v1/me/verdict: a guest who signs up', () => {
     await getVerdict(guest)
     const calls = await buildQueued(guest)
     const asGuest = await dataOf<LockedView>(await getVerdict(guest))
-    expect(asGuest).toEqual({ status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, escalates: 0 })
+    expect(asGuest).toEqual({ status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, ...GROUPS, escalates: 0 })
     const queuedBefore = queuedFor(guest).length
 
     await guest.signUp()
@@ -681,9 +821,10 @@ describe('GET /api/v1/me/verdict: a guest who signs up', () => {
       status: 'ready',
       locked: false,
       fit: 'ready',
+      ...GROUPS,
       products: [
-        { entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false },
-        { entryId: serum, ...shows(serum), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false },
+        { entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false, ...SUGGEST },
+        { entryId: serum, ...shows(serum), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST },
       ],
       tapers: [expect.objectContaining({ code: STEROID_TAPER, kind: 'steroid' })],
     })
@@ -760,7 +901,8 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
       status: 'ready',
       locked: false,
       fit: 'not-ready',
-      products: [{ entryId, ...shows(entryId), group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false }],
+      ...GROUPS,
+      products: [{ entryId, ...shows(entryId), group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, ...SUGGEST }],
       tapers: [],
     })
   })
@@ -780,9 +922,31 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
     expect(view).toMatchObject({ status: 'ready', locked: false, fit: 'ready', tapers: [] })
     const byId = new Map(view.products.map((product) => [product.entryId, product]))
     // The judge named no pick, so the floor's tie-break reduces the add-on (the acid) before the treatment.
-    expect(byId.get(acid)).toEqual({ entryId: acid, ...shows(acid), group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, reason: expect.any(String), escalate: false })
+    expect(byId.get(acid)).toEqual({ entryId: acid, ...shows(acid), group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, reason: expect.any(String), escalate: false, ...SUGGEST })
     expect(byId.get(acid)!.reason.length).toBeGreaterThan(0)
-    expect(byId.get(retinoid)).toEqual({ entryId: retinoid, ...shows(retinoid), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false })
+    expect(byId.get(retinoid)).toEqual({ entryId: retinoid, ...shows(retinoid), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false, ...SUGGEST })
+  })
+
+  it('suggests the frequency, in plain words, for a product reduced to alternate days', async () => {
+    const guest = await newMember()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    await onShelf(guest, [...CLEAN, RETINOID_INGREDIENT])
+    const acid = await onShelf(guest, [...CLEAN, ACID_INGREDIENT])
+    await getVerdict(guest)
+    await buildQueued(guest)
+
+    const view = await dataOf<ReadyView>(await getVerdict(guest))
+
+    const reduced = view.products.find((product) => product.entryId === acid)!
+    expect(reduced.verdict).toEqual({ kind: 'reduce', maxFrequency: 'alternate-days' })
+    expect(reduced.suggest.length).toBeGreaterThanOrEqual(1)
+    expect(reduced.suggest.length).toBeLessThanOrEqual(3)
+    for (const line of reduced.suggest) {
+      expect(line.toLowerCase()).not.toContain('alternate-days')
+      expect(gateTrips(line), `"${line}"`).toEqual([])
+    }
+    expect(reduced.suggest).not.toEqual(view.products.find((product) => product.entryId !== acid)!.suggest)
   })
 
   it('shows a product the user said a doctor prescribed as prescribed and kept, whatever the rules would say of its ingredients', async () => {
@@ -802,7 +966,8 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
       status: 'ready',
       locked: false,
       fit: 'ready',
-      products: [{ entryId, ...shows(entryId), group: 'prescribed', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false }],
+      ...GROUPS,
+      products: [{ entryId, ...shows(entryId), group: 'prescribed', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, ...SUGGEST }],
       tapers: [],
     })
   })
@@ -823,5 +988,275 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
     expect(res.status).toBe(200)
     expect(await dataOf(res)).toEqual({ status: 'pending' })
     expect(queuedFor(guest)).toHaveLength(2)
+  })
+})
+
+// --- POST /api/v1/me/verdict/products/{entryId}/reports (spec #259, PR B1) ---
+//
+// "Report a mistake": a verified account tells the team that a product's verdict looks wrong. It stores a report and raises the verdict-report ops alert; it never changes
+// the verdict. The route has no call on the typed client until it exists, so it is called with plain fetch (as `getEntry` is). The checks run in this order: 401 (no session),
+// 403 SIGNUP_REQUIRED (a guest), 400 VALIDATION_FAILED (the note), 404 VERDICT_PRODUCT_NOT_FOUND (the entry is not a product of the verdict the person would be served right now:
+// ready, and built from the inputs as they are now; a pending or stale verdict has none). Answers 201 { id } for a new report and 200 { id } for an update of the report for the
+// same entry and verdict. Reports are read back through the repository, the only way to see them (the team reads the table).
+// The alert is not asserted here: its claim is per kind and window in the shared database, so whether this file wins the window is not up to a test (the service test pins it).
+
+// Imported when first used, so that a missing repository fails the report tests alone and not every test in this file.
+const reportsRepository = {
+  find: async (id: string) => new (await import('../../src/modules/verdicts/verdicts.reports.repository')).D1VerdictReportsRepository(db).find(id),
+}
+const reportsUrl = (entryId: string) => `${ORIGIN}/api/v1/me/verdict/products/${entryId}/reports`
+const postReport = (guest: Guest | undefined, entryId: string, body: unknown = {}) =>
+  fetchWorker(reportsUrl(entryId), {
+    method: 'POST',
+    headers: { ...(guest ? guest.headers() : { 'cf-connecting-ip': freshIp() }), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+const reportIdOf = async (res: Response) => (await dataOf<{ id: string }>(res)).id
+const failureOf = async (res: Response) => (await res.json()) as { success: false; status: number; error: { code: string } }
+
+/** A member with a goal, a clean shelf of `count` products (and a steroid cream when asked) and a verdict that has been built the way life builds one. */
+const memberWithVerdict = async (count: number, withSteroid = false) => {
+  const member = await newMember()
+  await putGoal(member)
+  await putSafety(member, { choices: ['none'] })
+  const clean: string[] = []
+  for (let i = 0; i < count; i++) clean.push(await onShelf(member))
+  const steroid = withSteroid ? await onShelf(member, [...CLEAN, STEROID_INGREDIENT]) : undefined
+  await getVerdict(member)
+  await buildQueued(member)
+  return { member, clean, steroid }
+}
+
+describe('POST /api/v1/me/verdict/products/{entryId}/reports: who may report', () => {
+  it('answers 401 AUTH_REQUIRED without a session, even for a body that would be refused', async () => {
+    const res = await postReport(undefined, crypto.randomUUID(), { note: 'x'.repeat(600) })
+
+    expect(res.status).toBe(401)
+    expect(await res.json()).toMatchObject({ success: false, status: 401, error: { code: 'AUTH_REQUIRED' } })
+  })
+
+  it('answers a guest 403 SIGNUP_REQUIRED, even for a note that is too long, and stores nothing', async () => {
+    const guest = await newGuest()
+
+    const res = await postReport(guest, crypto.randomUUID(), { note: 'x'.repeat(600) })
+
+    expect(res.status).toBe(403)
+    expect(await res.json()).toMatchObject({ success: false, status: 403, error: { code: 'SIGNUP_REQUIRED' } })
+  })
+})
+
+describe('POST /api/v1/me/verdict/products/{entryId}/reports: reporting a product of the verdict', () => {
+  it('answers 201 with the new report\'s id in the success envelope, and stores what the person was shown: the product\'s group and verdict, the note and the verdict\'s fingerprint', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+
+    const res = await postReport(member, clean[0]!, { note: 'This is not my cream' })
+
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as { data: { id: string } }
+    expect(body).toEqual({ success: true, status: 201, message: expect.any(String), data: { id: expect.any(String) } })
+    const stored = await reportsRepository.find(body.data.id)
+    expect(stored).toMatchObject({
+      profileId: member.profileId,
+      entryId: clean[0],
+      kind: 'mistake',
+      group: 'helping',
+      verdict: { kind: 'keep' },
+      basis: null,
+      note: 'This is not my cream',
+      fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+      oldProductId: null,
+      newProductId: null,
+    })
+  })
+
+  it('stores a stopped product with its step-down\'s code, so the verdict can be reproduced', async () => {
+    const { member, steroid } = await memberWithVerdict(1, true)
+
+    const res = await postReport(member, steroid!, { note: 'I stopped this long ago' })
+
+    expect(res.status).toBe(201)
+    expect(await reportsRepository.find(await reportIdOf(res))).toMatchObject({ entryId: steroid, group: 'likely-the-problem', verdict: { kind: 'stop', taperTemplateId: STEROID_TAPER } })
+  })
+
+  it('answers 200 with the same id when the same product is reported again for the same verdict, and keeps the latest note', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+    const first = await postReport(member, clean[0]!, { note: 'first thoughts' })
+    expect(first.status).toBe(201)
+    const id = await reportIdOf(first)
+
+    const again = await postReport(member, clean[0]!, { note: 'second thoughts' })
+
+    expect(again.status).toBe(200)
+    expect(await again.json()).toEqual({ success: true, status: 200, message: expect.any(String), data: { id } })
+    expect(await reportsRepository.find(id)).toMatchObject({ note: 'second thoughts' })
+  })
+
+  it('answers 201 with a new id for the same product once the verdict has been rebuilt, and keeps the first report', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+    const first = await postReport(member, clean[0]!, { note: 'before the rebuild' })
+    const firstId = await reportIdOf(first)
+    await onShelf(member)
+    await getVerdict(member)
+    await buildQueued(member)
+
+    const second = await postReport(member, clean[0]!, { note: 'after the rebuild' })
+
+    expect(second.status).toBe(201)
+    const secondId = await reportIdOf(second)
+    expect(secondId).not.toBe(firstId)
+    const [before, after] = [await reportsRepository.find(firstId), await reportsRepository.find(secondId)]
+    expect(before).toMatchObject({ note: 'before the rebuild' })
+    expect(after).toMatchObject({ note: 'after the rebuild' })
+    expect(after!.fingerprint).not.toBe(before!.fingerprint)
+  })
+
+  it('never changes the verdict: the same body is served after the report, and no new build is queued', async () => {
+    const { member, clean } = await memberWithVerdict(2)
+    const before = await dataOf<VerdictBody>(await getVerdict(member))
+    const queuedBefore = queuedFor(member).length
+
+    expect((await postReport(member, clean[0]!, { note: 'wrong' })).status).toBe(201)
+
+    expect(await dataOf(await getVerdict(member))).toEqual(before)
+    expect(queuedFor(member)).toHaveLength(queuedBefore)
+  })
+})
+
+describe('POST /api/v1/me/verdict/products/{entryId}/reports: the note', () => {
+  it('keeps a note of exactly 500 characters, answers 201 for 500 characters with spaces around them and stores them trimmed, and refuses 501 with 400 VALIDATION_FAILED', async () => {
+    const { member, clean } = await memberWithVerdict(3)
+
+    const exact = await postReport(member, clean[0]!, { note: 'a'.repeat(500) })
+    const padded = await postReport(member, clean[1]!, { note: `  ${'b'.repeat(500)}\n` })
+    const over = await postReport(member, clean[2]!, { note: 'c'.repeat(501) })
+
+    expect(exact.status).toBe(201)
+    expect((await reportsRepository.find(await reportIdOf(exact)))!.note).toBe('a'.repeat(500))
+    expect(padded.status).toBe(201)
+    expect((await reportsRepository.find(await reportIdOf(padded)))!.note).toBe('b'.repeat(500))
+    expect(over.status).toBe(400)
+    expect((await failureOf(over)).error.code).toBe('VALIDATION_FAILED')
+  })
+
+  it.each([
+    ['no note', {}],
+    ['an empty note', { note: '' }],
+    ['a note of spaces', { note: '   ' }],
+  ])('answers 201 for %s and stores a null note', async (_label, body) => {
+    const { member, clean } = await memberWithVerdict(1)
+
+    const res = await postReport(member, clean[0]!, body)
+
+    expect(res.status).toBe(201)
+    expect((await reportsRepository.find(await reportIdOf(res)))!.note).toBeNull()
+  })
+
+  it.each([
+    ['a note that is not text', { note: 12 }],
+    ['a null note', { note: null }],
+    ['a field it does not know', { note: 'fine', entryId: 'other' }],
+  ])('answers 400 VALIDATION_FAILED for %s', async (_label, body) => {
+    const { member, clean } = await memberWithVerdict(1)
+
+    const res = await postReport(member, clean[0]!, body)
+
+    expect(res.status).toBe(400)
+    expect((await failureOf(res)).error.code).toBe('VALIDATION_FAILED')
+  })
+
+  it('looks at the note before the entry: a note that is too long for an entry that is not in the verdict gets 400, not 404', async () => {
+    const { member } = await memberWithVerdict(1)
+
+    const res = await postReport(member, crypto.randomUUID(), { note: 'x'.repeat(501) })
+
+    expect(res.status).toBe(400)
+    expect((await failureOf(res)).error.code).toBe('VALIDATION_FAILED')
+  })
+})
+
+describe('POST /api/v1/me/verdict/products/{entryId}/reports: a product that is not in the verdict being served', () => {
+  it('answers 404 VERDICT_PRODUCT_NOT_FOUND in the failure envelope for an entry the verdict does not hold', async () => {
+    const { member } = await memberWithVerdict(1)
+
+    const res = await postReport(member, crypto.randomUUID(), { note: 'x' })
+
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ success: false, status: 404, error: { code: 'VERDICT_PRODUCT_NOT_FOUND' } })
+  })
+
+  it('answers 404 for another profile\'s entry, and stores nothing for either', async () => {
+    const mine = await memberWithVerdict(1)
+    const theirs = await memberWithVerdict(1)
+
+    const res = await postReport(mine.member, theirs.clean[0]!, { note: 'x' })
+
+    expect(res.status).toBe(404)
+    expect((await failureOf(res)).error.code).toBe('VERDICT_PRODUCT_NOT_FOUND')
+  })
+
+  it('answers 404 while the verdict is pending, for an entry that is on the shelf', async () => {
+    const member = await newMember()
+    await putGoal(member)
+    await putSafety(member, { choices: ['none'] })
+    const entryId = await onShelf(member)
+    await getVerdict(member)
+
+    const res = await postReport(member, entryId, { note: 'x' })
+
+    expect(res.status).toBe(404)
+    expect((await failureOf(res)).error.code).toBe('VERDICT_PRODUCT_NOT_FOUND')
+  })
+
+  it('answers 404 for a product of a verdict that is stale: the shelf changed after it was built, and it is not served as if it were current', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+    await onShelf(member)
+
+    const res = await postReport(member, clean[0]!, { note: 'x' })
+
+    expect(res.status).toBe(404)
+    expect((await failureOf(res)).error.code).toBe('VERDICT_PRODUCT_NOT_FOUND')
+  })
+})
+
+describe('POST /api/v1/me/verdict/products/{entryId}/reports: the note stays private', () => {
+  const PRIVATE = 'QZ-PRIVATE-NOTE-7731'
+
+  it('is in no console output, queued message, outbound request or later response, whether the report is new, updated or refused', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+    const spies = (['log', 'debug', 'info', 'warn', 'error'] as const).map((level) => vi.spyOn(console, level).mockImplementation(() => {}))
+    // A report makes no outbound call of its own: any would fail here.
+    const outbound: string[] = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      outbound.push(String(input))
+      throw new Error('no outbound request is expected')
+    })
+
+    const responses = [
+      await postReport(member, clean[0]!, { note: PRIVATE }),
+      await postReport(member, clean[0]!, { note: `${PRIVATE} again` }),
+      await postReport(member, crypto.randomUUID(), { note: PRIVATE }),
+      await postReport(member, clean[0]!, { note: PRIVATE.repeat(30) }),
+    ]
+    vi.unstubAllGlobals()
+
+    expect(responses.map((res) => res.status)).toEqual([201, 200, 404, 400])
+    expect(outbound).toEqual([])
+    for (const res of responses) expect(await res.clone().text()).not.toContain(PRIVATE)
+    expect(JSON.stringify(spies.flatMap((spy) => spy.mock.calls))).not.toContain(PRIVATE)
+    expect(JSON.stringify({ email: emailQueued, verdicts: verdictsQueued, parse: parseQueued })).not.toContain(PRIVATE)
+  })
+
+  it('is not sent to the fit judge when the verdict is rebuilt after a report, and is in no verdict body', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+    expect((await postReport(member, clean[0]!, { note: PRIVATE })).status).toBe(201)
+    await onShelf(member)
+    await getVerdict(member)
+
+    const calls = await buildQueued(member)
+
+    expect(calls.length).toBeGreaterThan(0)
+    expect(JSON.stringify(calls.map((call) => call.body))).not.toContain(PRIVATE)
+    expect(JSON.stringify(await dataOf(await getVerdict(member)))).not.toContain(PRIVATE)
+    expect(JSON.stringify(verdictsQueued)).not.toContain(PRIVATE)
   })
 })
