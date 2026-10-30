@@ -19,6 +19,7 @@ import type { RemindersService } from '../reminders/reminders.service'
 import type { SafetyService } from '../safety/safety.service'
 import type { StartedProfile } from '../reminders/reminders.types'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
+import type { ShelfRemovedReason } from '../shelf/shelf.types'
 import type { SkinCareService } from '../skin-care/skin-care.service'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
 import type { SavedVerdictView, VerdictService } from '../verdicts/verdicts.service'
@@ -42,10 +43,10 @@ export type RoutineServiceDeps = {
   recommendations: Pick<RecommendationService, 'candidatesFor' | 'shoppingFor'>
   goals: Pick<GoalsService, 'goalFor'>
   safety: Pick<SafetyService, 'snapshotFor'>
-  shelf: Pick<ShelfService, 'activeEntriesFor' | 'add'>
+  shelf: Pick<ShelfService, 'activeEntriesFor' | 'removedEntriesFor' | 'removedProductIdsFor' | 'add'>
   catalog: Pick<ProductCatalogService, 'shelfFacts'>
   faceScans: Pick<FaceScanService, 'seenFor'>
-  workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'countries'>
+  workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'countries' | 'tapersByCode'>
   profiles: Pick<ProfilesService, 'find'>
   /** The profile's stored time zone, which decides where its local days begin. */
   reminders: Pick<RemindersService, 'zoneFor'>
@@ -89,7 +90,13 @@ type Facts = {
   /** For each shelf product the skeleton is built from (by entry id): the form of its product and the verdict item's one-line reason, for the "Not in your routine" list. */
   noted: ReadonlyMap<string, { form: ProductForm | null; reason: string }>
   country: string
+  /** The running step-downs of removed products (#259 B4), found beside the shelf because a product put back on it is matched against the shelf's verdicts. */
+  removed: RemovedTapers
 }
+
+/** `carriedRemoved`: previous step-downs kept for products no longer on the shelf, as they were. `continuedAs`: a removed entry's id to the id of the new entry of the same product that carries its step-down on. */
+type RemovedTapers = { carriedRemoved: StoredTaper[]; continuedAs: ReadonlyMap<string, string> }
+const NO_REMOVED: RemovedTapers = { carriedRemoved: [], continuedAs: new Map() }
 
 /**
  * A profile's routine (spec #189): the rules decide what the shelf and the goal allow, the writer puts it in words, and the gates check what it wrote. A routine is
@@ -101,6 +108,9 @@ type Facts = {
 export class RoutineService {
   private static readonly MINUTE_MS = 60 * 1000
   private static readonly DAY_MS = 24 * 60 * RoutineService.MINUTE_MS
+  private static readonly WEEK_DAYS = 7
+  // The only reasons a shelf entry can be removed with and its running step-down go on; any other (or later) reason ends it.
+  private static readonly CARRYING_REMOVAL_REASONS: readonly (ShelfRemovedReason | null)[] = [null, 'finished']
   // A pending version this old had its build die: it is ignored, and the next build goes on over it.
   private static readonly STALE_AFTER_MS = 15 * RoutineService.MINUTE_MS
   private static readonly WRITER_TRIES = 3
@@ -272,10 +282,14 @@ export class RoutineService {
         if (error instanceof ConflictError && NOT_YET.has(error.code)) return
         throw error
       }
-      // The shelf as the build keeps it: an entry the build leaves out, or a reduced sunscreen the build keeps, must not make the two fingerprints differ.
-      const shelf = (await this.shelfOf(profileId, saved)).shelf.map(sunscreenKept)
-      const fingerprint = await RoutineService.fingerprintOf(goal, cautionsOf(safety.view.choices, shelf), shelf)
-      if ((await this.repository.current(profileId))?.routineFingerprint === fingerprint) return
+      // The shelf as the build keeps it: an entry the build leaves out, or a reduced sunscreen the build keeps, must not make the two fingerprints differ. Nor must the tapering
+      // caution a carried step-down keeps: the build and this read ask the same question (`removedTapersOf`), or every read would queue a build.
+      const { entries, shelf: held } = await this.shelfOf(profileId, saved)
+      const shelf = held.map(sunscreenKept)
+      const current = await this.repository.current(profileId)
+      const { carriedRemoved } = await this.removedTapersOf(profileId, current?.startedOn ? current : null, { entries, shelf: held }, async () => localDate(this.now(), await this.reminders.zoneFor(profileId)))
+      const fingerprint = await RoutineService.fingerprintOf(goal, cautionsOf(safety.view.choices, shelf, carriedRemoved.length > 0), shelf)
+      if (current?.routineFingerprint === fingerprint) return
       await this.enqueue(profileId, 'verdict', fingerprint)
     } catch (error) {
       console.error({ outcome: 'routine-stale-check-failed', profileId, error: describeError(error) })
@@ -437,21 +451,25 @@ export class RoutineService {
   private async buildAs(profileId: string, reason: RoutineBuildReason, options: RoutineBuildOptions): Promise<RoutineBuildResult> {
     const saved = await this.verdicts.savedFor(profileId)
     if (!saved || saved.fit !== 'ready') return 'waiting'
-    const facts = await this.factsOf(profileId, saved, options)
+    const current = await this.repository.current(profileId)
+    const previous = current?.startedOn ? current : null
+    const at = this.now()
+    // The person's local day, read once and only when something needs it.
+    let day: Promise<Date> | undefined
+    const todayOf = () => (day ??= this.reminders.zoneFor(profileId).then((zone) => localDate(at, zone)))
+    const facts = await this.factsOf(profileId, saved, options, previous, todayOf)
     if (!facts) return 'waiting'
+    const { carriedRemoved, continuedAs } = facts.removed
     // The version's id is minted before anything is written from the skeleton, because whether the writer sees outcome hints is decided by it.
     const versionId = this.newId()
     // Hints are only counted as shown once the counts are read: a read that fails costs the hints, not the build.
     const hinted = hintsShown(versionId) ? await this.withHints(facts) : null
     const skeleton = hinted ?? facts.skeleton
 
-    const current = await this.repository.current(profileId)
-    const previous = current?.startedOn ? current : null
-    const carry = previous ? await this.carryFor(facts, previous.steps, options) : null
-    const merge = previous && carry ? stableMerge(RoutineService.previousOf(previous, skeleton.goal), skeleton, carry) : null
+    const carry = previous ? { ...(await this.carryFor(facts, previous.steps, options)), carriedRemoved } : null
+    const merge = previous && carry ? stableMerge(RoutineService.previousOf(previous, skeleton.goal, continuedAs), skeleton, carry) : null
     const checking = merge?.checking ?? skeleton
-    const at = this.now()
-    const today = localDate(at, await this.reminders.zoneFor(profileId))
+    const today = await todayOf()
     // After Start, a step the merge did not keep is stamped with the day of this rebuild only if its product changed (or the step is new): the same product, a candidate the
     // person has since got included, keeps the day it had, whether the merge kept the step or the writer, or a whole-routine rebuild, wrote it again. Before Start every step is day 1, which is null.
     const changedOn = RoutineService.stampedDay(previous?.startedOn ?? null, today)
@@ -469,7 +487,8 @@ export class RoutineService {
     const catalogVersion = (await this.workbook.verdictReference()).catalogVersion
     const routine = await RoutineService.fingerprintOf(skeleton.goal, skeleton.person.cautions, skeleton.shelf)
     const shelfCounts = RoutineService.countsOf(skeleton.shelf)
-    const notInRoutine = RoutineService.leftOutOf(skeleton.shelf, facts.noted)
+    // A carried step-down keeps the title (and reason) its product was left out of the routine with: its product is not on the shelf now, so nothing else would name it.
+    const notInRoutine = [...RoutineService.leftOutOf(skeleton.shelf, facts.noted), ...carriedRemoved.flatMap((t) => previous?.notInRoutine?.filter((item) => item.entryId === t.shelfProductId) ?? [])]
     const base: Omit<RoutineVersionRow, 'id'> = {
       profileId,
       status: 'ready',
@@ -508,8 +527,8 @@ export class RoutineService {
 
     // Nothing is broken: the routine is kept as it is, and only a change to what it shows (or the cautions it was built under) is worth a version.
     if (merge && merge.writerSkeleton === null) {
-      const kept = { steps: merge.fixed, tapers: RoutineService.datedFrom(merge.carriedTapers, base.startedOn, today), expectation: merge.expectation ?? expectationFor(skeleton.goal) }
-      if (RoutineService.sameAs(current!, kept) && stableJson(current!.cautions) === stableJson(skeleton.person.cautions)) {
+      const keptRoutine = { steps: merge.fixed, tapers: RoutineService.datedFrom(merge.carriedTapers, base.startedOn, today), expectation: merge.expectation ?? expectationFor(skeleton.goal) }
+      if (RoutineService.sameAs(current!, keptRoutine) && stableJson(current!.cautions) === stableJson(skeleton.person.cautions)) {
         // A retry that finds nothing to rewrite is done with: the version is not due another.
         if (reason === 'writer-retry' && current!.writerRetryDueAt !== null) await this.repository.clearWriterRetry(current!.id)
         // The inputs changed (or the stale read would ask again on every read) but the routine did not: it now stands for the inputs it was just checked against.
@@ -522,7 +541,7 @@ export class RoutineService {
         console.log({ outcome: 'routine-unchanged', profileId })
         return 'unchanged'
       }
-      await this.appendReady(ready(kept, { writerRetryDueAt: reason === 'writer-retry' ? null : current!.writerRetryDueAt }))
+      await this.appendReady(ready(keptRoutine, { writerRetryDueAt: reason === 'writer-retry' ? null : current!.writerRetryDueAt }))
       console.log({ outcome: 'routine-built', profileId, source: 'rules', writerCalls: 0 })
       return 'built'
     }
@@ -543,7 +562,7 @@ export class RoutineService {
     const startedBefore = pending.startedOn === null ? (await this.repository.current(profileId))?.startedOn : null
     if (startedBefore) await this.repository.markStarted(profileId, startedBefore)
 
-    const { written, calls } = await this.write(profileId, pending.id, asked, checking, assemble)
+    const { written, calls } = await this.write(profileId, pending.id, asked, checking, carriedRemoved, assemble)
     const built = written ?? assemble(rulesOnlyRoutine(asked))
     const after = await this.afterWrite(profileId, pending, built.steps)
     const startedOn = pending.startedOn ?? after.startedOn
@@ -610,6 +629,7 @@ export class RoutineService {
     versionId: string,
     asked: RoutineSkeleton,
     checking: RoutineSkeleton,
+    carriedRemoved: readonly StoredTaper[],
     assemble: (answer: Routine) => SplicedRoutine,
   ): Promise<{ written: SplicedRoutine | null; calls: number }> {
     let retry: RoutineRetry | undefined
@@ -623,7 +643,7 @@ export class RoutineService {
         continue
       }
       const built = assemble(answer)
-      const failed: GateFailure[] = checkRoutine(checking, asRoutine(built.steps, built.tapers, built.expectation))
+      const failed: GateFailure[] = checkRoutine(checking, asRoutine(built.steps, built.tapers, built.expectation), carriedRemoved)
       if (failed.length === 0) return { written: built, calls }
       retry = { failed }
     }
@@ -644,7 +664,7 @@ export class RoutineService {
   }
 
   /** Reads what the skeleton is built from, as the profile's user. Null while the goal, the safety answers or the shopping country are missing. */
-  private async factsOf(profileId: string, saved: SavedVerdictView, options: RoutineBuildOptions): Promise<Facts | null> {
+  private async factsOf(profileId: string, saved: SavedVerdictView, options: RoutineBuildOptions, previous: RoutineVersionRow | null, todayOf: () => Promise<Date>): Promise<Facts | null> {
     const [goal, safety] = await Promise.all([this.goals.goalFor(profileId), this.safety.snapshotFor(profileId)])
     if (goal === null || safety.view === null) return null
     let shopping: Awaited<ReturnType<RoutineServiceDeps['recommendations']['shoppingFor']>>
@@ -660,6 +680,7 @@ export class RoutineService {
 
     const { entries, shelf, noted } = await this.shelfOf(profileId, saved)
     const seen = await this.faceScans.seenFor(profileId)
+    const removed = await this.removedTapersOf(profileId, previous, { entries, shelf }, todayOf)
     const skeleton = assembleSkeleton({
       goal,
       seen: seen.seen,
@@ -670,8 +691,9 @@ export class RoutineService {
       shelf,
       candidates: offered,
       hintsShown: false,
+      carriedTaper: removed.carriedRemoved.length > 0,
     })
-    return { profileId, skeleton, offered, entries, noted, country: shopping.country }
+    return { profileId, skeleton, offered, entries, noted, country: shopping.country, removed }
   }
 
   /** The active shelf entries, and the ones the skeleton is built from: those the verdict decided on and whose product can be found. */
@@ -749,9 +771,47 @@ export class RoutineService {
     return null
   }
 
+  /**
+   * The step-downs of the started routine `previous` that go on though their shelf product has been removed (#259 B4), as that version had them (start date included). One goes on
+   * when it had begun, its entry was removed with no reason or `finished` (an allow-list: `stopped`, `not-mine` and any reason added later end it), and its template's last week has not
+   * passed on the person's local day: a step-down begun on day D whose last week is W runs through D + 7W - 1, as the viewer counts it, and the rebuild on D + 7W drops it. A template
+   * the workbook no longer holds ends it too (the viewer could not show it). Nothing more is read than the active shelf already in hand until a begun step-down has left it.
+   *
+   * A going-on step-down whose product was put back as a new entry that the rules stop on the same template is not kept for the removed entry: it CONTINUES on the new one
+   * (`continuedAs`, old entry id to new), which takes its start date, so the person is never put back at week 1 and sees the product's real name.
+   */
+  private async removedTapersOf(profileId: string, previous: RoutineVersionRow | null, active: { entries: ShelfActiveEntry[]; shelf: SkeletonShelfProduct[] }, todayOf: () => Promise<Date>): Promise<RemovedTapers> {
+    const onShelf = new Set(active.entries.map((entry) => entry.id))
+    const gone = previous?.tapers.filter((taper) => taper.startedOn !== null && !onShelf.has(taper.shelfProductId)) ?? []
+    if (gone.length === 0) return NO_REMOVED
+    const reasons = new Map((await this.shelf.removedEntriesFor(profileId)).map(({ id, reason }) => [id, reason]))
+    const removed = gone.filter((taper) => reasons.has(taper.shelfProductId) && RoutineService.CARRYING_REMOVAL_REASONS.includes(reasons.get(taper.shelfProductId)!))
+    if (removed.length === 0) return NO_REMOVED
+    const templates = await this.workbook.tapersByCode(removed.map((taper) => taper.templateId))
+    const today = await todayOf()
+    const running = removed.filter((taper) => {
+      const last = templates.get(taper.templateId)?.schedule.at(-1)
+      return last !== undefined && today.getTime() < taper.startedOn!.getTime() + last.toWeek * RoutineService.WEEK_DAYS * RoutineService.DAY_MS
+    })
+    const stops = active.shelf.flatMap((product) => (product.verdict.kind === 'stop' ? [{ id: product.id, templateId: product.verdict.taperTemplateId }] : []))
+    if (!running.some((taper) => stops.some((stop) => stop.templateId === taper.templateId))) return { carriedRemoved: running, continuedAs: new Map() }
+    const productIds = await this.shelf.removedProductIdsFor(profileId, running.map((taper) => taper.shelfProductId))
+    const continuedAs = new Map<string, string>()
+    for (const taper of running) {
+      const productId = productIds.get(taper.shelfProductId)
+      const putBack = stops.find(
+        (stop) => stop.templateId === taper.templateId && ![...continuedAs.values()].includes(stop.id) && active.entries.some((entry) => entry.id === stop.id && entry.kind === 'product' && entry.productId === productId),
+      )
+      if (productId !== undefined && putBack) continuedAs.set(taper.shelfProductId, putBack.id)
+    }
+    return { carriedRemoved: running.filter((taper) => !continuedAs.has(taper.shelfProductId)), continuedAs }
+  }
+
   /** The routine in force as the merge reads it. A row written before versions stored their goal is taken to have the current one. */
-  private static previousOf(row: RoutineVersionRow, goal: Goal) {
-    return { id: row.id, goal: row.goal ?? goal, expectation: row.expectation ?? '', steps: row.steps, tapers: row.tapers }
+  private static previousOf(row: RoutineVersionRow, goal: Goal, continuedAs: ReadonlyMap<string, string>) {
+    // A step-down that continues on a product put back is the previous version's, under the new entry's id: the merge keeps the start date of the taper it finds for a stopped entry.
+    const tapers = row.tapers.map((taper) => (continuedAs.has(taper.shelfProductId) ? { ...taper, shelfProductId: continuedAs.get(taper.shelfProductId)! } : taper))
+    return { id: row.id, goal: row.goal ?? goal, expectation: row.expectation ?? '', steps: row.steps, tapers }
   }
 
   /** The step-downs with the undated ones dated `day` (the person's local date at the rebuild, as its UTC midnight), when the routine is started (`startedOn` set); before Start none has a date. None begins before day 1: Start makes tomorrow day 1, so a stop added in between waits for it. */
@@ -791,7 +851,8 @@ export class RoutineService {
   /** Whether the routine in force shows the same steps and step-downs (to the day) as `next`; the bookkeeping of where a step came from is not shown. */
   private static sameAs(row: RoutineVersionRow, next: Pick<SplicedRoutine, 'steps' | 'tapers'>): boolean {
     const stepsOf = (steps: StoredRoutineStep[]) => steps.map(({ fixedFrom: _fixedFrom, ...step }) => step)
-    const tapersOf = (tapers: StoredTaper[]) => tapers.map((t) => ({ ...t, startedOn: t.startedOn?.getTime() ?? null }))
+    // By entry: the order step-downs are listed in is not shown (a carried one follows the shelf's own), so a reorder alone is not a change.
+    const tapersOf = (tapers: StoredTaper[]) => tapers.map((t) => ({ ...t, startedOn: t.startedOn?.getTime() ?? null })).sort((a, b) => (a.shelfProductId < b.shelfProductId ? -1 : a.shelfProductId > b.shelfProductId ? 1 : 0))
     return stableJson(stepsOf(row.steps)) === stableJson(stepsOf(next.steps)) && stableJson(tapersOf(row.tapers)) === stableJson(tapersOf(next.tapers))
   }
 }
