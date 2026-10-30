@@ -345,17 +345,20 @@ export class CatalogWorkbookService {
   }
 
   /**
-   * In production only, the approved rows of the tabs people are shown (Tapers, Guides, Reintroductions, Escalations, Responses, Weeks) whose approver is not on
-   * the list: they have to have been approved by a qualified person. The approver is a label in a cell, so this is a process control and not authentication. The
-   * problem never holds the name.
+   * In production only, the approved rows of the tabs people are shown (Tapers, Guides, Reintroductions, Escalations, Responses, Weeks, and since contract 2.4.0
+   * Ingredients and Claim words, whose `reviewer_role` the verdict shows as "Reviewed by") whose approver is not on the list: they have to have been approved by a
+   * qualified person. The role's own words are not judged: they are the listed approver's to write. The approver is a label in a cell, so this is a process control
+   * and not authentication. The problem never holds the name.
    */
   private unqualifiedApprovals(workbook: Workbook): WorkbookProblem[] {
     if (this.environment !== 'production') return []
-    const unqualified = (tab: 'tapers' | 'guides' | 'reintroductions' | 'escalations' | 'responses' | 'weeks', rows: readonly { status: string; approvedBy: string | null }[]) =>
+    const unqualified = (tab: 'ingredients' | 'claimWords' | 'tapers' | 'guides' | 'reintroductions' | 'escalations' | 'responses' | 'weeks', rows: readonly { status: string; approvedBy: string | null }[]) =>
       rows.flatMap((row, i): WorkbookProblem[] =>
         row.status === 'approved' && !this.qualifiedApprovers.has(row.approvedBy ?? '') ? [{ tab, row: i + 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }] : [],
       )
     return [
+      ...unqualified('ingredients', workbook.ingredients),
+      ...unqualified('claimWords', workbook.claimWords),
       ...unqualified('tapers', workbook.tapers),
       ...unqualified('guides', workbook.guides),
       ...unqualified('reintroductions', workbook.reintroductions),

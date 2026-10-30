@@ -261,6 +261,9 @@ deployed ones (the same gitignored files as above). The token is sent only in th
   sheet. An upload is refused, before anything is sent, if the file was exported from another environment or for another contract version, and the
   server refuses it (`CATALOG_STALE`) if the catalog has moved on since: export again and redo the edits on the new file. `catalog:export` will not replace a file that already exists unless you pass
   `--force`.
+- **Contract 2.4.1: export again after this is deployed.** Only the wording of `UNQUALIFIED_APPROVER` changed: in production the approver gate now covers the
+  Ingredients and Claim words tabs too, so every approved rule and claim word (the seed's rules included, signed `reference seed`) needs an `approved_by` on the
+  `QUALIFIED_APPROVERS` list. No column or value moved, but a 2.4.0 file is refused (`409 CONTRACT_MISMATCH`), so redo its edits on a fresh export.
 - **Contract 2.4.0: export again after this is deployed, and fill three things before the next import.** A file exported at 2.3.0 (or earlier) is refused by
   `catalog:upload` with a message to export again, and by the server as `409 CONTRACT_MISMATCH`. The Ingredients and Claim words tabs gain `reviewer_role`, the
   role of the reviewer as the app shows it under "Reviewed by" (for example "a consultant dermatologist", never a name), required on every approved row; Claim words
@@ -289,7 +292,7 @@ deployed ones (the same gitignored files as above). The token is sent only in th
   server refuses it too, as `409 CONTRACT_MISMATCH` whatever tabs the body has (the upload sends the file's contract version, and it is checked before the
   tabs), so a 1.0.0 file posted by hand gets that and not a 400. Export a fresh file and move your edits across; the old file's rows keep
   working as they are. An old eval snapshot (`eval-data/routine/catalog-snapshot.xlsx`) needs the same re-export.
-- **Who may approve a step-down template, a guide or the daily-loop text.** All are shown to people, so in **production** the server refuses an approved Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row unless its
+- **Who may approve a rule, a claim word, a step-down template, a guide or the daily-loop text.** All are shown to people (a rule or claim word with its `reviewer_role`, as "Reviewed by"), so in **production** the server refuses an approved Ingredients, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row unless its
   `approved_by` is one of the labels in the `QUALIFIED_APPROVERS` var (comma-separated, matched whole and exactly, spaces around a label ignored). It is set in
   `wrangler.jsonc` for each environment and is **empty** until the first qualified approver is named, which refuses every approved row of those tabs in production.
   The refusal is `400 CATALOG_INVALID` with `UNQUALIFIED_APPROVER` for each row, and never repeats the name. Staging and local accept any approver, so the

@@ -36,7 +36,7 @@ const importCatalog = defineRoute({
     'refuses one made for another contract version (409 `CONTRACT_MISMATCH`, checked before anything else), refuses one made from a catalog version that is not live (409 `CATALOG_STALE`), and reports the diff per tab. The default is a dry run that writes nothing. ' +
     'With `dryRun=false` and the original `.xlsx` as `file`, the file is archived and the change applied in one atomic write, which the catalog version guards. ' +
     'Problems with the workbook come as 400 `CATALOG_INVALID` with `error.details.problems`: `{ tab, row, column, rule }`, never a cell value. ' +
-    'In production, an approved Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row whose `approved_by` is not on the server\'s list of qualified approvers is such a problem too (`UNQUALIFIED_APPROVER`). ' +
+    'In production, an approved Ingredients, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row whose `approved_by` is not on the server\'s list of qualified approvers is such a problem too (`UNQUALIFIED_APPROVER`). ' +
     'A workbook of the current contract version that is not eleven tabs of a header row and rows is 400 `VALIDATION_FAILED`, checked after the contract version. ' +
     'Other 400 codes: `CATALOG_FILE_REQUIRED` (applying without a file), `CATALOG_FILE_TOO_LARGE` (over 10 MB), `CATALOG_FILE_NOT_XLSX` (not a zip, so not an .xlsx) and ' +
     '`CATALOG_TOO_LARGE` (the change is too many rows for one atomic write; it is never split, so make it in smaller uploads). ' +

@@ -97,6 +97,10 @@ const edited = async (
       if (!live.workbook[name].rows.some((row) => keyOf(row) === keyOf(needed) && row.status === 'approved')) live.workbook[name].rows.push(signed(needed))
     }
   }
+  // A production upload signs the approved rules and claim words too, which the seed signed as itself.
+  if (options.approver !== undefined) {
+    for (const tab of [live.workbook.ingredients, live.workbook.claimWords]) tab.rows = tab.rows.map((row) => (row.status === 'approved' ? signed(row) : row))
+  }
   if (options.reviewerRoles !== false) {
     for (const tab of [live.workbook.ingredients, live.workbook.claimWords]) {
       for (const row of tab.rows) if (row.status === 'approved' && (row.reviewer_role ?? null) === null) row.reviewer_role = 'a consultant dermatologist'
@@ -116,7 +120,7 @@ describe('CatalogWorkbookService.exportWorkbook', () => {
 
     const live = await service.exportWorkbook()
 
-    expect(live).toMatchObject({ catalogVersion: 1, contractVersion: '2.4.0' })
+    expect(live).toMatchObject({ catalogVersion: 1, contractVersion: '2.4.1' })
     expect(live.workbook.products).toEqual({ headers: expect.arrayContaining(['code', 'status', 'draft_cells']), rows: [] })
     expect(live.workbook.ingredients.rows.length).toBeGreaterThan(0)
   })
@@ -1711,6 +1715,127 @@ describe.each(SPECS)('CatalogWorkbookService: the $title tab', (spec) => {
 
       await expect(dryRun(service, await uploading(service, signedBy('Somebody Else')))).resolves.toMatchObject({ applied: false })
     })
+  })
+})
+
+// Contract 2.4.0 shows a rule's and a claim word's `reviewer_role` to people as "Reviewed by" (spec #259), so in production their approver has to be on the list too
+// (the owner, 2026-10-30). The role's own words are the listed approver's to write: the server does not judge them.
+describe('CatalogWorkbookService: the approver gate in production on Ingredients and Claim words', () => {
+  const QUALIFIED = 'Dr Q. Approver'
+  const inProduction = (qualifiedApprovers: string | undefined) =>
+    new CatalogWorkbookService({
+      repository: new FakeCatalogWorkbookRepository(),
+      archive: new MemoryWorkbookArchive({ environment: 'production' }),
+      now: () => new Date('2030-06-15T10:00:00Z'),
+      newId: () => 'id',
+      environment: 'production',
+      qualifiedApprovers,
+    })
+  const claimWord = (over: RawRow = {}): RawRow => ({
+    code: 'CLM-FAIRNESS',
+    phrase: 'fairness',
+    claim: 'lightening',
+    source_url: null,
+    status: 'approved',
+    approved_by: QUALIFIED,
+    reviewer_role: 'a consultant dermatologist',
+    approved_on: '2030-01-02',
+    audited_by: null,
+    audited_on: null,
+    ...over,
+  })
+  /** The export, signed throughout by `QUALIFIED` as a production upload is, with one claim word, then `edit`. */
+  const upload = async (service: CatalogWorkbookService, edit: (workbook: RawWorkbook) => void = () => {}) =>
+    edited(
+      service,
+      (w) => {
+        w.claimWords.rows.push(claimWord())
+      },
+      { approver: QUALIFIED },
+    ).then((built) => {
+      edit(built.workbook)
+      return built
+    })
+  const firstApproved = (rows: RawRow[]) => rows.findIndex((row) => row.status === 'approved')
+
+  it('refuses an approved Ingredients row whose approver is not on the list, naming the approved_by cell and never the name', async () => {
+    const service = inProduction(QUALIFIED)
+    let row = 0
+    const edit = await upload(service, (w) => {
+      const i = firstApproved(w.ingredients.rows)
+      w.ingredients.rows[i] = { ...w.ingredients.rows[i], approved_by: 'reference seed' }
+      row = i + 2
+    })
+
+    const error = await dryRun(service, edit).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'CATALOG_INVALID', details: { problems: [{ tab: 'ingredients', row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }] } })
+    expect(JSON.stringify(error)).not.toContain('reference seed')
+  })
+
+  it('refuses an approved Claim words row whose approver is not on the list', async () => {
+    const service = inProduction(QUALIFIED)
+    const edit = await upload(service, (w) => {
+      w.claimWords.rows[0] = { ...w.claimWords.rows[0], approved_by: 'Claude draft - staging only, not reviewed' }
+    })
+
+    await expect(dryRun(service, edit)).rejects.toMatchObject({
+      code: 'CATALOG_INVALID',
+      details: { problems: [{ tab: 'claimWords', row: 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }] },
+    })
+  })
+
+  it('takes rules and claim words approved by anyone on the list', async () => {
+    const service = inProduction(`${QUALIFIED}, Dr Other`)
+    const edit = await upload(service, (w) => {
+      w.claimWords.rows[0] = { ...w.claimWords.rows[0], approved_by: 'Dr Other' }
+    })
+
+    await expect(dryRun(service, edit)).resolves.toMatchObject({ applied: false })
+  })
+
+  it('does not judge the reviewer role: a listed approver may write any role, which is theirs to answer for', async () => {
+    const service = inProduction(QUALIFIED)
+    const edit = await upload(service, (w) => {
+      w.claimWords.rows[0] = { ...w.claimWords.rows[0], reviewer_role: 'Claude draft, not reviewed' }
+      const i = firstApproved(w.ingredients.rows)
+      w.ingredients.rows[i] = { ...w.ingredients.rows[i], reviewer_role: 'Claude draft, not reviewed' }
+    })
+
+    await expect(dryRun(service, edit)).resolves.toMatchObject({ applied: false })
+  })
+
+  it('takes a draft or retired rule or claim word by anyone: only an approved row is shown to people', async () => {
+    const service = inProduction(QUALIFIED)
+    const edit = await upload(service, (w) => {
+      // A claim word has no draft status, so the draft is a rule.
+      w.ingredients.rows.push(rule({ status: 'draft', approved_by: 'Somebody Else', approved_on: null }))
+      w.claimWords.rows.push(claimWord({ code: 'CLM-BLEACH', phrase: 'bleach', status: 'retired', approved_by: 'Somebody Else' }))
+    })
+
+    await expect(dryRun(service, edit)).resolves.toMatchObject({ applied: false })
+  })
+
+  it('lets nobody approve a rule or a claim word when no list is held', async () => {
+    const service = inProduction(undefined)
+    const edit = await upload(service)
+
+    const problems = await dryRun(service, edit).then(
+      () => [],
+      (error: { details: { problems: { tab: string; rule: string }[] } }) => error.details.problems,
+    )
+
+    expect(problems.filter((problem) => problem.tab === 'ingredients').length).toBeGreaterThan(0)
+    expect(problems.filter((problem) => problem.tab === 'claimWords')).toEqual([expect.objectContaining({ rule: 'UNQUALIFIED_APPROVER' })])
+  })
+
+  it('is not asked for outside production, where the seed\'s own approver and any other do', async () => {
+    const { service } = build()
+    const edit = await edited(service, (w) => {
+      w.claimWords.rows.push(claimWord({ approved_by: 'Somebody Else' }))
+    })
+
+    await expect(dryRun(service, edit)).resolves.toMatchObject({ applied: false })
   })
 })
 

@@ -1559,9 +1559,13 @@ describe('the production approver gate', () => {
     workbook.guides.rows = baseGuideRows().map((row) => ({ ...row, approved_by: QUALIFIED }))
     signReviewed(workbook)
   }
-  /** The ladders, escalations, responses and week cards in force are approved too, and the gate is for them as much as for templates: they are signed by someone on the list. */
+  /**
+   * The ladders, escalations, responses and week cards in force are approved too, and the gate is for them as much as for templates: they are signed by someone on the list. So are
+   * the approved rules and claim words (the seed signed its rules as itself), which the gate checks since contract 2.4.0.
+   */
   const signReviewed = (workbook: RawWorkbook) => {
     for (const tab of ['reintroductions', 'escalations', 'responses', 'weeks'] as const) workbook[tab].rows = workbook[tab].rows.map((row) => ({ ...row, approved_by: QUALIFIED }))
+    for (const tab of ['ingredients', 'claimWords'] as const) workbook[tab].rows = workbook[tab].rows.map((row) => (row.status === 'approved' ? { ...row, approved_by: QUALIFIED } : row))
   }
   const dry = (edit: (workbook: RawWorkbook) => void, workerEnv: typeof env) =>
     upload(
@@ -1657,12 +1661,37 @@ describe('the production approver gate', () => {
     expect(res.status).toBe(200)
   })
 
-  it('checks only Tapers, Guides, Reintroductions, Escalations, Responses and Weeks: products, rules and claim words approved by anyone are accepted in production', async () => {
+  it('does not check Products: a product approved by anyone is accepted in production', async () => {
     const { res } = await dry((workbook) => {
       withCountry(workbook, NIGERIA)
       workbook.products.rows.push(productRow({ approved_by: 'Somebody Else' }))
+    }, asProduction(QUALIFIED))
+
+    expect(res.status).toBe(200)
+  })
+
+  // Contract 2.4.0 shows a rule's and a claim word's reviewer role as "Reviewed by" (spec #259), so their approver is checked too (the owner, 2026-10-30).
+  it('refuses an approved rule and an approved claim word whose approver is not on the list, one problem each, and never the name', async () => {
+    let rows = { ingredients: 0, claimWords: 0 }
+    const { res } = await dry((workbook) => {
       workbook.ingredients.rows.push(ruleRow({ approved_by: 'Somebody Else' }))
       workbook.claimWords.rows.push(claimWordRow({ approved_by: 'Somebody Else' }))
+      rows = { ingredients: workbook.ingredients.rows.length + 1, claimWords: workbook.claimWords.rows.length + 1 }
+    }, asProduction(QUALIFIED))
+
+    expect(res.status).toBe(400)
+    const body = await res.clone().text()
+    expect(body).not.toContain('Somebody Else')
+    expect((await problemsOf(res)).filter((problem) => problem.tab === 'ingredients' || problem.tab === 'claimWords')).toEqual([
+      { tab: 'ingredients', row: rows.ingredients, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+      { tab: 'claimWords', row: rows.claimWords, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+    ])
+  })
+
+  it('accepts a rule and a claim word approved by someone on the list, whatever reviewer role they write', async () => {
+    const { res } = await dry((workbook) => {
+      workbook.ingredients.rows.push(ruleRow({ approved_by: QUALIFIED, reviewer_role: 'Claude draft, not reviewed' }))
+      workbook.claimWords.rows.push(claimWordRow({ approved_by: QUALIFIED, reviewer_role: 'Claude draft, not reviewed' }))
     }, asProduction(QUALIFIED))
 
     expect(res.status).toBe(200)

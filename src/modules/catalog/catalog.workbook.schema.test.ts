@@ -263,7 +263,7 @@ const text = (length: number, char = 'a') => char.repeat(length)
 
 describe('the contract', () => {
   it('is version 2.4.0: the contract that adds reviewer_role to Ingredients and Claim words, source_url to Claim words and the about-a-product escalation', () => {
-    expect(CONTRACT_VERSION).toBe('2.4.0')
+    expect(CONTRACT_VERSION).toBe('2.4.1')
   })
 
   it('is plain data: it survives JSON unchanged, so nothing in it (a pattern, a limit) can be left out of the fingerprint', () => {
@@ -405,7 +405,7 @@ describe('the contract', () => {
 // with it, this literal) is a silent change to what a workbook may hold, so it fails here. Bumping means: CONTRACT_VERSION, then the version
 // and fingerprint below, then `npm run catalog:contract-doc`.
 // The fingerprint of contract 2.4.0 (`await contractFingerprint()`, pinned at release as this file describes).
-const RELEASED = { version: '2.4.0', fingerprint: 'eb5d5d1bd931dc2f4f21f1bed12e60c81e3905a01155a56b2ee504660dda3005' }
+const RELEASED = { version: '2.4.1', fingerprint: '2d99c296efb349b25d13b010f04a4907d5d3b64e661cd93a9f766da5bd08314c' }
 
 describe('contractFingerprint', () => {
   it('is the one released for this CONTRACT_VERSION: change CONTRACT only together with a bump of CONTRACT_VERSION and of RELEASED in this file', async () => {
