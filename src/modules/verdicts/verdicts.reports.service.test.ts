@@ -45,7 +45,7 @@ const FINGERPRINT = 'f'.repeat(64)
 const REBUILT_FINGERPRINT = 'e'.repeat(64)
 
 const products = (): SavedVerdictProduct[] => [
-  { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, escalate: false, reason: 'Niacinamide works on dark marks.', facts: [], step: 'treat', sourceUrls: [] },
+  { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, escalate: false, reason: 'Niacinamide works on dark marks.', facts: [], basis: [{ kind: 'fit', line: 'A fit check.' }], step: 'treat', sourceUrls: [] },
   {
     entryId: 'entry-b',
     group: 'likely-the-problem',
@@ -53,10 +53,11 @@ const products = (): SavedVerdictProduct[] => [
     escalate: false,
     reason: 'Holds a steroid, which is stopped step by step.',
     facts: [{ kind: 'ingredient-group', group: 'steroid', ingredient: 'Clobetasol Propionate', ruleName: 'clobetasol propionate' }],
+    basis: [{ kind: 'rule', source: 'ingredient-rule', statement: 'Clobetasol propionate is a steroid, stepped down, never stopped suddenly.', sourceUrl: 'https://example.org/rules/clobetasol', reviewerRole: 'Dermatologist', line: 'Clobetasol propionate is a steroid, stepped down, never stopped suddenly.' }],
     step: null,
     sourceUrls: ['https://example.org/rules/clobetasol'],
   },
-  { entryId: 'entry-c', group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, escalate: false, reason: 'Clashes with the acid.', facts: [], step: 'treat', sourceUrls: [] },
+  { entryId: 'entry-c', group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, escalate: false, reason: 'Clashes with the acid.', facts: [], basis: [{ kind: 'fit', line: 'A fit check.' }], step: 'treat', sourceUrls: [] },
 ]
 
 const savedView = (over: Partial<SavedVerdictView> = {}): SavedVerdictView => ({ fingerprint: FINGERPRINT, fit: 'ready', builtAt: at(-HOUR), rulesVersion: 'rules-v1', products: products(), ...over })
