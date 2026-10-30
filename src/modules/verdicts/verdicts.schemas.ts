@@ -128,3 +128,12 @@ export const ShelfVerdictResponse = z
     }),
   ])
   .openapi('ShelfVerdict')
+
+export const VerdictReportParams = z.object({ entryId: z.string().openapi({ description: 'The shelf entry the report is about: the `entryId` of a product of `GET /api/v1/me/verdict`.' }) })
+
+export const VerdictReportBody = z
+  .object({ note: z.string().optional().openapi({ description: 'What looks wrong, in the person\'s own words. Trimmed; at most 500 characters once trimmed (more is 400 `VALIDATION_FAILED`); empty or spaces only is no note. Only the team reads it.' }) })
+  .strict()
+  .openapi('VerdictReportBody')
+
+export const VerdictReportResponse = z.object({ id: z.string().openapi({ description: 'The report\'s id.' }) }).openapi('VerdictReport')

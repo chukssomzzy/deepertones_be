@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "1451ff99-2eef-4637-a270-7e042e842ad5",
+  "id": "f2390da1-44a6-4767-9455-50167114f72c",
   "prevId": "b9df465c-9070-4dc4-b1b9-c703dfb64a3b",
   "tables": {
     "job_runs": {
@@ -846,13 +846,6 @@
           "notNull": true,
           "autoincrement": false
         },
-        "source_url": {
-          "name": "source_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "status": {
           "name": "status",
           "type": "text",
@@ -862,13 +855,6 @@
         },
         "approved_by": {
           "name": "approved_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "reviewer_role": {
-          "name": "reviewer_role",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -1225,13 +1211,6 @@
         },
         "approved_by": {
           "name": "approved_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "reviewer_role": {
-          "name": "reviewer_role",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -2531,6 +2510,148 @@
         "profile_fitzpatrick_profile_id_profiles_id_fk": {
           "name": "profile_fitzpatrick_profile_id_profiles_id_fk",
           "tableFrom": "profile_fitzpatrick",
+          "tableTo": "profiles",
+          "columnsFrom": [
+            "profile_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "face_share_consents": {
+      "name": "face_share_consents",
+      "columns": {
+        "profile_id": {
+          "name": "profile_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "given_at": {
+          "name": "given_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "withdrawn_at": {
+          "name": "withdrawn_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "face_share_consents_user_id_idx": {
+          "name": "face_share_consents_user_id_idx",
+          "columns": [
+            "user_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "face_share_consents_profile_id_profiles_id_fk": {
+          "name": "face_share_consents_profile_id_profiles_id_fk",
+          "tableFrom": "face_share_consents",
+          "tableTo": "profiles",
+          "columnsFrom": [
+            "profile_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "face_shares": {
+      "name": "face_shares",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "profile_id": {
+          "name": "profile_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "before_scan_id": {
+          "name": "before_scan_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "after_scan_id": {
+          "name": "after_scan_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "consent_version": {
+          "name": "consent_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "face_shares_profile_id_created_at_idx": {
+          "name": "face_shares_profile_id_created_at_idx",
+          "columns": [
+            "profile_id",
+            "created_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "face_shares_profile_id_profiles_id_fk": {
+          "name": "face_shares_profile_id_profiles_id_fk",
+          "tableFrom": "face_shares",
           "tableTo": "profiles",
           "columnsFrom": [
             "profile_id"

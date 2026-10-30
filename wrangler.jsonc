@@ -218,7 +218,9 @@
     { "name": "SHOPPING_SET_IP_LIMITER", "namespace_id": "1030", "simple": { "limit": 20, "period": 60 } },
     { "name": "SHOPPING_SET_USER_LIMITER", "namespace_id": "1031", "simple": { "limit": 10, "period": 60 } },
     { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "1014", "simple": { "limit": 120, "period": 60 } },
-    { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "1015", "simple": { "limit": 60, "period": 60 } }
+    { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "1015", "simple": { "limit": 60, "period": 60 } },
+    // Making the share card spends an Images transformation (5,000 a month free): as tight as the other routes that can cost something.
+    { "name": "FACE_SHARE_USER_LIMITER", "namespace_id": "1032", "simple": { "limit": 10, "period": 60 } }
   ],
 
   // Three crons; the Worker's scheduled handler picks the job by the cron that fired (src/jobs/scheduled.ts), so a change here
@@ -262,6 +264,10 @@
     { "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" },
     { "binding": "PRIVATE_PHOTOS", "bucket_name": "deepertones-private" }
   ],
+
+  // Cloudflare Images, for the before-and-after share card (spec #259): the card is composed from the face photos and streamed back, never stored.
+  // The free plan allows 5,000 unique transformations a month; past that new ones fail with error 9422 and the share answers 503 (and alerts the owner).
+  "images": { "binding": "IMAGES" },
 
   // More storage bindings, added as we need them:
   // "kv_namespaces": [{ "binding": "KV", "id": "" }],
@@ -488,7 +494,9 @@
         { "name": "SHOPPING_SET_IP_LIMITER", "namespace_id": "2030", "simple": { "limit": 20, "period": 60 } },
         { "name": "SHOPPING_SET_USER_LIMITER", "namespace_id": "2031", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "2014", "simple": { "limit": 120, "period": 60 } },
-        { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "2015", "simple": { "limit": 60, "period": 60 } }
+        { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "2015", "simple": { "limit": 60, "period": 60 } },
+        // Making the share card spends an Images transformation (5,000 a month free): as tight as the other routes that can cost something.
+        { "name": "FACE_SHARE_USER_LIMITER", "namespace_id": "2032", "simple": { "limit": 10, "period": 60 } }
       ],
       // Daily guest cleanup at 03:17 UTC, the scan reaper every 10 minutes and the reminder send job every 15 (see the top level).
       "triggers": { "crons": ["17 3 * * *", "*/10 * * * *", "*/15 * * * *"] },
@@ -510,7 +518,8 @@
       "r2_buckets": [
         { "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" },
         { "binding": "PRIVATE_PHOTOS", "bucket_name": "deepertones-private" }
-      ]
+      ],
+      "images": { "binding": "IMAGES" }
     },
     "production": {
       "routes": [{ "pattern": "api.deepertones.com", "custom_domain": true }],
@@ -722,7 +731,9 @@
         { "name": "SHOPPING_SET_IP_LIMITER", "namespace_id": "3030", "simple": { "limit": 20, "period": 60 } },
         { "name": "SHOPPING_SET_USER_LIMITER", "namespace_id": "3031", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "3014", "simple": { "limit": 120, "period": 60 } },
-        { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "3015", "simple": { "limit": 60, "period": 60 } }
+        { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "3015", "simple": { "limit": 60, "period": 60 } },
+        // Making the share card spends an Images transformation (5,000 a month free): as tight as the other routes that can cost something.
+        { "name": "FACE_SHARE_USER_LIMITER", "namespace_id": "3032", "simple": { "limit": 10, "period": 60 } }
       ],
       // Daily guest cleanup at 03:17 UTC, the scan reaper every 10 minutes and the reminder send job every 15 (see the top level).
       "triggers": { "crons": ["17 3 * * *", "*/10 * * * *", "*/15 * * * *"] },
@@ -744,7 +755,8 @@
       "r2_buckets": [
         { "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" },
         { "binding": "PRIVATE_PHOTOS", "bucket_name": "deepertones-private" }
-      ]
+      ],
+      "images": { "binding": "IMAGES" }
     }
   }
 }

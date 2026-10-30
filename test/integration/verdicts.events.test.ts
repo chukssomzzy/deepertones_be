@@ -294,7 +294,9 @@ const LIGHTENING_TAPER = code('TPR-LIGHTENING')
 const STEROID_INGREDIENT = `${word('zq')} corticoidum`
 // #259 A2: every ready body also carries `groups` (the fixed headings with counts) and each full product `suggest`; their words are pinned in verdicts.view.test.ts.
 const GROUPS = { groups: expect.any(Array) }
-const SUGGEST = { suggest: expect.any(Array) }
+// #259 A3: each full product also carries its `basis`, and the full body `professional`; both are pinned in verdicts.routes.test.ts.
+const SUGGEST = { suggest: expect.any(Array), basis: expect.any(Array) }
+const PROFESSIONAL = { professional: expect.any(Object) }
 const helpingBody = (entryId: string, shown: object, fit: 'ready' | 'not-ready' = 'ready') => ({
   status: 'ready',
   locked: false,
@@ -306,6 +308,7 @@ const helpingBody = (entryId: string, shown: object, fit: 'ready' | 'not-ready' 
       : { entryId, ...shown, group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false, ...SUGGEST },
   ],
   tapers: [],
+  ...PROFESSIONAL,
 })
 
 describe('GET /api/v1/me/verdict/events: who may follow, and before the templates are approved', () => {
@@ -406,7 +409,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     const [verdict] = (await stream.read(2)).frames.map(parseFrame)
     expect(verdict!.event).toBe('verdict')
     const view = verdict!.data as ReadyView
-    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'professional', 'status', 'tapers'])
     expect(view.products.find((product) => product.entryId === steroid)).toEqual({
       entryId: steroid,
       ...shows(steroid),

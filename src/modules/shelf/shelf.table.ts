@@ -8,7 +8,7 @@ import { profiles } from '../profiles/profiles.table'
  * (profile, product): scanning the product again updates the row to the latest item (latest wins: formulation, source scan and item, and
  * `last_scanned_at` move on; `added_at` keeps the first time). A no-label row is one per item, has no product or formulation, and the
  * source item holds the user's answers. Removing is soft: `removed_at` (null while on the shelf) and an optional `removed_reason` are
- * set, and a later scan of the product clears them. `scan_id` and `item_id` are the source with no foreign keys, as scans can outlive
+ * set, and a later scan of the product clears them. The reason `wrong-product` is written only by the swap ("this isn't the right product"); the public removals refuse it. `scan_id` and `item_id` are the source with no foreign keys, as scans can outlive
  * or be cleaned apart from the shelf. Rows go with their profile (cascade), so guest cleanup needs no cleaner of its own.
  *
  * Two catalog facts readers depend on. A named label that adopts an unnamed product's list deletes the unnamed product (see
@@ -31,7 +31,7 @@ export const profileProducts = sqliteTable(
     addedAt: integer('added_at', { mode: 'timestamp_ms' }).notNull(),
     lastScannedAt: integer('last_scanned_at', { mode: 'timestamp_ms' }).notNull(),
     removedAt: integer('removed_at', { mode: 'timestamp_ms' }),
-    removedReason: text('removed_reason', { enum: ['finished', 'stopped', 'not-mine'] }),
+    removedReason: text('removed_reason', { enum: ['finished', 'stopped', 'not-mine', 'wrong-product'] }),
   },
   // The first unique index is the product dedupe and the upsert's conflict target; the second makes a repeated no-label move a no-op.
   (t) => [

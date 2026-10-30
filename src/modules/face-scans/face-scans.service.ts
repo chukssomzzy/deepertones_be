@@ -3,6 +3,7 @@ import { requireUser, requireVerified } from '../../lib/context'
 import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { describeImageBytes, readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
+import { localDay, usableZone } from '../../lib/local-day'
 import { describeUnexpectedError } from '../../lib/safe-error'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import {
@@ -91,6 +92,9 @@ export type FaceScanView = {
 /** The view of a scan that was retaken: it always has its front photo. */
 export type RetakenFaceScanView = FaceScanView & { photos: { front: { url: string } } }
 
+/** A scan the share card draws: its id, its stored front photo's key and its calendar date, 'YYYY-MM-DD', in the person's own zone. */
+export type ShareScan = { scanId: string; frontPhotoKey: string; localDay: string }
+
 export type FaceScanServiceDeps = {
   repository: FaceScansRepository
   goals: Pick<GoalsService, 'requireGoal' | 'current' | 'history' | 'historyFor'>
@@ -105,6 +109,8 @@ export type FaceScanServiceDeps = {
   notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake' | 'faceCheckInDue'>
   /** A Perfect Corp account problem is raised to the owner here. */
   opsAlerts: Pick<OpsAlertsService, 'raise'>
+  /** The stored reminders time zone (RemindersService.zoneFor): where a person's calendar days are read for the share card. */
+  reminders: { zoneFor(profileId: string): Promise<string | null> }
   /** Asks for the routine's review-point rebuild when a check-in scan is ready. A failure of it never changes what the scan does. */
   onRoutineTrigger?: RoutineTrigger
   /** Signs the photo links. photo-link.ts derives its own key from it. */
@@ -149,6 +155,7 @@ export class FaceScanService {
   private readonly events: ScanEvents
   private readonly notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake' | 'faceCheckInDue'>
   private readonly opsAlerts: Pick<OpsAlertsService, 'raise'>
+  private readonly reminders: { zoneFor(profileId: string): Promise<string | null> }
   private readonly onRoutineTrigger: RoutineTrigger | undefined
   readonly #photoLinkSecret: string
   private readonly environment: PhotoEnvironment
@@ -166,6 +173,7 @@ export class FaceScanService {
     this.events = deps.events
     this.notifications = deps.notifications
     this.opsAlerts = deps.opsAlerts
+    this.reminders = deps.reminders
     this.onRoutineTrigger = deps.onRoutineTrigger
     this.#photoLinkSecret = deps.photoLinkSecret
     this.environment = deps.environment
@@ -340,6 +348,36 @@ export class FaceScanService {
     // Scans under one goal share a day one, so its scores are read once for the list.
     const dayOneResults = new Map<string, Promise<FaceResult[]>>()
     return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults, history)))
+  }
+
+  /**
+   * What the before-and-after share card needs, by profile id with no session (the share asks; reads only): the current goal's day-one scan, and the asked-for scan when it
+   * is a later `ready` scan of the same chase. Day one is the chase rule's own answer (`chaseStartFor`, then the earliest ready scan under the goal since the chase began, as
+   * the result view reads it), never worked out again here. Each comes with its stored front photo's key and its calendar date in the person's reminders zone (UTC when
+   * there is none or Intl does not know it), so a count of days between two dates needs no clock.
+   *
+   * `before` is null when there is no goal, no ready scan in the chase or the day one has no front photo; `after` is null whenever `before` is, and for a scan that is unknown,
+   * another profile's, the day one itself, not ready, of another goal, of an earlier chase or without a front photo: those are not told apart.
+   */
+  async beforeAndAfterFor(profileId: string, afterScanId: string): Promise<{ before: ShareScan | null; after: ShareScan | null }> {
+    const none = { before: null, after: null }
+    const history = await this.goals.historyFor(profileId)
+    const goal = history.at(-1)?.goal
+    if (!goal) return none
+    const now = this.now()
+    const since = chaseStartFor(history, goal, now)
+    if (since === null) return none
+    const dayOne = await this.repository.dayOneFor({ profileId, goal, at: now, since, scanId: afterScanId })
+    const dayOneFront = dayOne && (await this.frontPhotoKeyOf(dayOne.id))
+    if (!dayOne || !dayOneFront) return none
+    const zone = usableZone(now, await this.reminders.zoneFor(profileId))
+    const shareScan = (scan: FaceScan, frontPhotoKey: string): ShareScan => ({ scanId: scan.id, frontPhotoKey, localDay: localDay(scan.createdAt, zone) })
+    const before = shareScan(dayOne, dayOneFront)
+
+    const asked = await this.repository.findFaceScan(afterScanId)
+    const isLater = asked && asked.profileId === profileId && asked.state === 'ready' && asked.goalAtScan === goal && asked.id !== dayOne.id && asked.createdAt >= since && asked.createdAt >= dayOne.createdAt
+    const askedFront = isLater ? await this.frontPhotoKeyOf(asked.id) : null
+    return { before, after: isLater && askedFront ? shareScan(asked, askedFront) : null }
   }
 
   /**
@@ -993,6 +1031,10 @@ export class FaceScanService {
       cache.set(id, read)
     }
     return read
+  }
+
+  private async frontPhotoKeyOf(faceScanId: string): Promise<string | null> {
+    return (await this.repository.photosOf(faceScanId)).find((photo) => photo.position === 'front')?.photoKey ?? null
   }
 
   private async currentGoal(): Promise<Goal | null> {

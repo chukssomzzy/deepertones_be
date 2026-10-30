@@ -12,6 +12,8 @@ import { CatalogWorkbookService } from './modules/catalog/catalog.workbook.servi
 import { FaceDataCleaner } from './modules/face-scans/face-scans.cleaner'
 import { D1FaceScansRepository } from './modules/face-scans/face-scans.repository'
 import { FaceScanService } from './modules/face-scans/face-scans.service'
+import { D1FaceSharesRepository } from './modules/face-shares/face-shares.repository'
+import { FaceSharesService } from './modules/face-shares/face-shares.service'
 import { D1GoalsRepository } from './modules/goals/goals.repository'
 import { GoalsService } from './modules/goals/goals.service'
 import { D1HealthRepository } from './modules/health/health.repository'
@@ -54,7 +56,9 @@ import { SkinCareService } from './modules/skin-care/skin-care.service'
 import type { SkinCareRoutine } from './modules/skin-care/skin-care.types'
 import { D1UsersRepository } from './modules/users/users.repository'
 import { UsersService } from './modules/users/users.service'
+import { D1VerdictReportsRepository } from './modules/verdicts/verdicts.reports.repository'
 import { D1VerdictsRepository } from './modules/verdicts/verdicts.repository'
+import { VerdictReportsService } from './modules/verdicts/verdicts.reports.service'
 import { VerdictService } from './modules/verdicts/verdicts.service'
 import { routineWriterWriteRoutinePrompt } from './prompts/prompts.generated'
 import { AnthropicClient } from './providers/anthropic/anthropic.client'
@@ -73,12 +77,16 @@ import { AnthropicProductAnalyst } from './providers/product-analysis/anthropic.
 import { AnthropicProductRecognizer } from './providers/product-recognition/anthropic.product-recognizer'
 import { AnthropicProductResearcher } from './providers/product-research/anthropic.product-researcher'
 import { ExpoPushSender } from './providers/push/expo.push'
+import { CloudflareImagesShareCardRenderer } from './providers/share-card/cloudflare-images.share-card-renderer'
 import { DurableObjectScanEvents } from './providers/scan-events/durable-object.scan-events'
 import { AnthropicRoutineWriter } from './providers/routine-writing/anthropic.routine-writer'
 import { AnthropicVerdictFitter } from './providers/verdict-fitting/anthropic.verdict-fitter'
 import { R2WorkbookArchive } from './providers/workbook-archive/r2.workbook-archive'
 
 const PHOTO_ENVIRONMENTS: readonly string[] = ['development', 'staging', 'production', 'test']
+
+/** The email logo in the public bucket (assets/email/logo.png, synced by CI): the share card's corner mark. */
+const EMAIL_LOGO_KEY = 'email/logo.png'
 
 /** The private bucket tells environments apart by key prefix, so an unknown ENVIRONMENT must stop the build, not become a prefix. */
 const photoEnvironment = (value: string): PhotoEnvironment => {
@@ -352,8 +360,27 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const verdictReportsRepository = once(() => new D1VerdictReportsRepository(db()))
+
   const shelf = once(
-    () => new ShelfService({ repository: new D1ShelfRepository(db()), catalog: catalog(), scans: scans(), now: () => new Date() }),
+    () =>
+      new ShelfService({
+        repository: new D1ShelfRepository(db()),
+        catalog: catalog(),
+        scans: scans(),
+        // The verdict as it would be served now (null while pending, out of date or unavailable): its stopped products by entry, with the code of the step-down each is shown
+        // with (`taperTemplateId`, the `code` of `tapers[]` in GET /me/verdict). The verdict is built on the shelf, so it is asked through here, not imported by the shelf module.
+        stepDowns: {
+          stopsFor: async (profileId): Promise<Map<string, string>> => {
+            const saved = await verdicts().savedFor(profileId)
+            return new Map((saved?.products ?? []).flatMap(({ entryId, verdict }) => (verdict.kind === 'stop' ? [[entryId, verdict.taperTemplateId] as const] : [])))
+          },
+        },
+        // Structural, so shelf does not import verdicts: the swap's report goes to the verdicts' report table.
+        wrongMatches: { record: (report, now) => verdictReportsRepository().recordWrongMatch(report, now) },
+        opsAlerts: opsAlerts(),
+        now: () => new Date(),
+      }),
   )
 
   const perfectCorp = once(() => new RestPerfectCorpClient({ apiKey: env.PERFECT_CORP_API_KEY, webhookSecret: env.PERFECT_CORP_WEBHOOK_SECRET, baseUrl: env.PERFECT_CORP_BASE_URL }))
@@ -377,10 +404,28 @@ export const buildContainer = (env: CloudflareBindings) => {
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
         notifications: notifications(),
         opsAlerts: opsAlerts(),
+        reminders: reminders(),
         // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
         photoLinkSecret: env.JWT_SECRET,
         environment: photoEnvironment(env.ENVIRONMENT),
         onRoutineTrigger: routineTrigger,
+      }),
+  )
+
+  const faceShares = once(
+    () =>
+      new FaceSharesService({
+        repository: new D1FaceSharesRepository(db()),
+        faceScans: faceScans(),
+        photos: privatePhotos(),
+        // The label font is a repo asset (assets/share-card/), synced to the public bucket like the email logo.
+        renderer: new CloudflareImagesShareCardRenderer({ images: env.IMAGES, fontUrl: `${env.CATALOG_IMAGES_PUBLIC_URL}/share-card/label.ttf` }),
+        readLogo: async () => {
+          const logo = await env.CATALOG_IMAGES.get(EMAIL_LOGO_KEY)
+          if (!logo) throw new Error('The email logo is not in the public bucket')
+          return { bytes: new Uint8Array(await logo.arrayBuffer()), mediaType: 'image/png' }
+        },
+        opsAlerts: opsAlerts(),
       }),
   )
 
@@ -415,6 +460,10 @@ export const buildContainer = (env: CloudflareBindings) => {
         onRoutineTrigger: routineTrigger,
         now: () => new Date(),
       }),
+  )
+
+  const verdictReports = once(
+    () => new VerdictReportsService({ repository: verdictReportsRepository(), verdicts: verdicts(), opsAlerts: opsAlerts(), now: () => new Date() }),
   )
 
   const routines = once(() => {
@@ -546,6 +595,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     get faceScans() {
       return faceScans()
     },
+    get faceShares() {
+      return faceShares()
+    },
     get goals() {
       return goals()
     },
@@ -608,6 +660,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get verdicts() {
       return verdicts()
+    },
+    get verdictReports() {
+      return verdictReports()
     },
   }
 }
