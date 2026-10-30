@@ -474,6 +474,8 @@ export const buildContainer = (env: CloudflareBindings) => {
       goals: goals(),
       safety: safety(),
       shelf: shelf(),
+      // The wrong-product swap's right product (#259 B5): the routines module sees only this read, not the verdicts module.
+      swaps: { rightProductsFor: (profileId, entryIds) => verdictReportsRepository().wrongMatchesFor(profileId, entryIds) },
       catalog: catalog(),
       faceScans: faceScans(),
       workbook: catalogWorkbook(),

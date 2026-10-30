@@ -26,6 +26,16 @@ export class FakeVerdictReportsRepository implements VerdictReportsRepository {
     this.rows.set(report.id, copyOf({ ...report, kind: 'wrong-match', group: null, verdict: null, basis: null, fingerprint: null, note: null, createdAt: now, updatedAt: now }))
   }
 
+  async wrongMatchesFor(profileId: string, entryIds: string[]): Promise<Map<string, string>> {
+    const asked = new Set(entryIds)
+    const rows = [...this.rows.values()]
+      .filter((row) => row.kind === 'wrong-match' && row.profileId === profileId && asked.has(row.entryId))
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    const latest = new Map<string, string>()
+    for (const { entryId, newProductId } of rows) if (newProductId !== null) latest.set(entryId, newProductId)
+    return latest
+  }
+
   async find(id: string): Promise<VerdictReport | null> {
     const row = this.rows.get(id)
     return row ? copyOf(row) : null

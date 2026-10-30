@@ -1,5 +1,5 @@
-import { eq, sql } from 'drizzle-orm'
-import type { Db } from '../../lib/db'
+import { and, asc, eq, inArray, sql } from 'drizzle-orm'
+import { queryByIds, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import type { Basis } from './verdicts.basis'
 import type { VerdictGroup } from './verdicts.merge'
@@ -36,6 +36,24 @@ export class D1VerdictReportsRepository {
   /** A plain insert: a person may swap the same entry's product more than once, and each swap is a report. */
   async recordWrongMatch(report: NewWrongMatchReport, now: Date): Promise<void> {
     await this.db.insert(verdictReports).values({ ...report, kind: 'wrong-match', group: null, verdict: null, basis: null, fingerprint: null, note: null, createdAt: now, updatedAt: now })
+  }
+
+  /**
+   * For each of the profile's entries that has a wrong-match report, the entry id to the new product of its latest report (by creation time; the id breaks a tie), for the routine to
+   * follow a swap with. Mistake reports and other profiles' reports are not read, an entry with no report is absent, and the ids are read in chunks under D1's parameter limit.
+   */
+  async wrongMatchesFor(profileId: string, entryIds: string[]): Promise<Map<string, string>> {
+    const rows = await queryByIds(entryIds, (chunk) =>
+      this.db
+        .select({ entryId: verdictReports.entryId, newProductId: verdictReports.newProductId })
+        .from(verdictReports)
+        .where(and(eq(verdictReports.profileId, profileId), eq(verdictReports.kind, 'wrong-match'), inArray(verdictReports.entryId, chunk)))
+        .orderBy(asc(verdictReports.createdAt), asc(verdictReports.id)),
+    )
+    const latest = new Map<string, string>()
+    // Each chunk's rows come oldest first and an entry sits in one chunk, so the last row for an entry is its latest.
+    for (const { entryId, newProductId } of rows) if (newProductId !== null) latest.set(entryId, newProductId)
+    return latest
   }
 
   /** The row whole, or null. Only the contract tests read it: the product shows no report back. */
