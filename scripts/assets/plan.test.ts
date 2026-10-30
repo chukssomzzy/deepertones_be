@@ -59,6 +59,7 @@ describe('contentTypeFor', () => {
     ['data.json', 'application/json'],
     ['notes.txt', 'text/plain; charset=utf-8'],
     ['site.css', 'text/css; charset=utf-8'],
+    ['share-card/label.ttf', 'font/ttf'],
   ])('maps %s to %s', (key, type) => {
     expect(contentTypeFor(key)).toBe(type)
   })

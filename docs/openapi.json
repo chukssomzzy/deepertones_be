@@ -3743,6 +3743,76 @@
           "current"
         ]
       },
+      "FaceShareConsentGivenResponse": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "givenAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "version",
+          "givenAt"
+        ]
+      },
+      "SetFaceShareConsentBody": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "The version of the face share consent wording the user agreed to. Only the current version is accepted."
+          }
+        },
+        "required": [
+          "version"
+        ]
+      },
+      "FaceShareConsentResponse": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "givenAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "withdrawnAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "current": {
+            "type": "boolean",
+            "description": "True while the consent is for the current wording and has not been withdrawn: the only consent a share accepts."
+          }
+        },
+        "required": [
+          "version",
+          "givenAt",
+          "withdrawnAt",
+          "current"
+        ]
+      },
+      "ShareFaceTimelineBody": {
+        "type": "object",
+        "properties": {
+          "afterScanId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The face scan to show as \"after\": a later ready scan of the current goal, with a front photo, at least 14 days after day one."
+          }
+        },
+        "required": [
+          "afterScanId"
+        ]
+      },
       "ProductSearch": {
         "type": "object",
         "properties": {
@@ -10142,6 +10212,386 @@
           },
           "500": {
             "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/face-share-consent": {
+      "put": {
+        "operationId": "setFaceShareConsent",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "Say yes to sharing a before-and-after card",
+        "description": "The consent covers sharing a before-and-after card of the face photos, made by the server and never stored. For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. The consent belongs to the active profile. Send `{ version }`, the version of the consent wording the user agreed to: only the current one is accepted, any other is 400 `FACE_SHARE_CONSENT_VERSION_MISMATCH` with `details.current`. It is asked once and remembered. Giving consent again, or after a withdrawal, is 200 and starts it afresh.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFaceShareConsentBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The consent as given",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/FaceShareConsentGivenResponse"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getFaceShareConsent",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "The face share consent this profile gave",
+        "description": "The consent covers sharing a before-and-after card of the face photos, made by the server and never stored. For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. The consent belongs to the active profile. A withdrawn consent is still shown, with `withdrawnAt` and `current` false, as is one for an older wording. 404 `FACE_SHARE_CONSENT_NOT_FOUND` until the profile has given one.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The consent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/FaceShareConsentResponse"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "withdrawFaceShareConsent",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "Take back the face share consent",
+        "description": "The consent covers sharing a before-and-after card of the face photos, made by the server and never stored. For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. The consent belongs to the active profile. Stamps the time and keeps the record. 204 again when already withdrawn, and 204 when there was never any consent. After it, the next share asks again.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The consent is withdrawn"
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/face-timeline/share": {
+      "post": {
+        "operationId": "shareFaceTimeline",
+        "tags": [
+          "Face shares"
+        ],
+        "summary": "Make the before-and-after card to share",
+        "description": "Makes a 1080 x 1920 card of the user's day one face photo and the one in `afterScanId`, labelled \"Day 1\" and \"Day N\", and answers it as a PNG with `Cache-Control: private, no-store`. The photos are only resized, never edited, and the card is made for this request and written nowhere by this service. Every goal may share, the fairer goal included. For a signed-up account, checked in this order: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `SHARE_CONSENT_REQUIRED` without a current face share consent, 409 `NO_DAY_ONE_PHOTO` when the current goal has no day one photo yet, 404 `FACE_SCAN_NOT_FOUND` when `afterScanId` is not a later ready scan of the same goal run with a front photo (an unknown scan, another profile's, day one itself and the rest are not told apart), 409 `SHARE_TOO_EARLY` when it is less than 14 days after day one in the user's own calendar days (N is the days since day one plus one). 503 `SHARE_UNAVAILABLE` when the card cannot be made right now, whatever the cause; nothing is recorded then, and trying again later is fine. A card that is made is recorded as one share. 429 `RATE_LIMITED` past 10 requests a minute per user.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShareFaceTimelineBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The card",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
             "content": {
               "application/json": {
                 "schema": {

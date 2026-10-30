@@ -48,11 +48,26 @@ const ALERTS: Record<OpsAlertKind, { windowMs: number; what: string; todo: strin
     what: "More analysis attempts than the catalog's daily analysis budget were made in 24 hours. Every attempt still goes ahead.",
     todo: 'Check that the formulations behind it are real, and raise dailyAnalysisBudget in catalog.service.ts if they are.',
   },
+  'verdict-report': {
+    windowMs: DAY,
+    what: 'People have reported shelf verdicts they think are wrong. The reports are in the verdict_reports table, where kind is mistake.',
+    todo: 'Read the new rows with a D1 query on verdict_reports (newest first by created_at), and check the verdicts against the rules.',
+  },
+  'wrong-match-report': {
+    windowMs: DAY,
+    what: 'People have swapped the product a shelf entry was matched to, which means the match was wrong. The reports are in the verdict_reports table, where kind is wrong-match.',
+    todo: 'Read the new rows with a D1 query on verdict_reports (newest first by created_at), and look at why the match missed.',
+  },
+  'share-render-quota': {
+    windowMs: HOUR,
+    what: 'The Cloudflare Images free monthly allowance (5,000 unique transformations) is used up. New share cards are refused until it resets.',
+    todo: 'Turn on Images Paid for the account in the Cloudflare dashboard if share cards are wanted before the month ends.',
+  },
 }
 
 /**
- * Emails the owner when an environment-wide problem needs them: Claude or Perfect Corp refusing our account (at most once an hour each) or a daily limit
- * passed (once a day, per limit). The limits never refuse anyone; this is how they are noticed.
+ * Emails the owner when an environment-wide problem needs them: Claude or Perfect Corp refusing our account or the share-card allowance used up (at most once an hour each), or a daily limit
+ * passed or reports to read (once a day, per kind). The limits never refuse anyone; this is how they are noticed.
  *
  * `raise` is called from the paths that hit the problem, so it NEVER throws and costs them one guarded write at most. It claims the
  * window first (see the repository), so however many callers hit the problem in a window, one job is queued; the email is sent

@@ -123,7 +123,8 @@ exist to undo.
    - 5a. **What to look for**: the key ingredient, strength, local price range and where it's sold, from the country's
      catalog. No buy button.
 6. **Share cards**: the verdict card and the progress timeline in vertical format. Product names are hidden by default.
-   Progress photos are never shared without explicit, per-share consent.
+   Progress photos are never shared without the person's explicit consent. It is asked once and remembered, can be
+   withdrawn at any time in settings, and once withdrawn the next share asks again.
 7. **Escalation**: a calm, normal screen that says when to see a professional.
 
 **Not in v1 design yet:** the paywall, premium page and subscription management. **Never:** a marketplace, purchase flow,
