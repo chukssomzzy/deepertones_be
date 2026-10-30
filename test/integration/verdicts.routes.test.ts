@@ -68,6 +68,7 @@ const quietQueue = { send: async () => {}, sendBatch: async () => {} } as unknow
 const parseQueued: unknown[] = []
 const parseQueue = { send: async (body: unknown) => void parseQueued.push(body), sendBatch: async () => {} } as unknown as Queue
 const otpQueued: unknown[] = []
+const emailQueued: unknown[] = []
 const WORKER_ENV = {
   ...env,
   OTP_CHANNELS: 'email',
@@ -77,6 +78,7 @@ const WORKER_ENV = {
   VERDICTS_QUEUE: verdictsQueue,
   SCAN_ITEMS_QUEUE: quietQueue,
   PARSE_SAFETY_QUEUE: parseQueue,
+  EMAIL_QUEUE: { send: async (body: unknown) => void emailQueued.push(body), sendBatch: async () => {} } as unknown as Queue,
   PUSH_DELIVERY_QUEUE: quietQueue,
 }
 const ORIGIN = 'http://deepertones.test'
@@ -91,6 +93,7 @@ afterEach(() => {
   verdictsQueued.length = 0
   otpQueued.length = 0
   parseQueued.length = 0
+  emailQueued.length = 0
 })
 
 const runSalt = String(Math.floor(Math.random() * 1e6))
@@ -985,5 +988,275 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
     expect(res.status).toBe(200)
     expect(await dataOf(res)).toEqual({ status: 'pending' })
     expect(queuedFor(guest)).toHaveLength(2)
+  })
+})
+
+// --- POST /api/v1/me/verdict/products/{entryId}/reports (spec #259, PR B1) ---
+//
+// "Report a mistake": a verified account tells the team that a product's verdict looks wrong. It stores a report and raises the verdict-report ops alert; it never changes
+// the verdict. The route has no call on the typed client until it exists, so it is called with plain fetch (as `getEntry` is). The checks run in this order: 401 (no session),
+// 403 SIGNUP_REQUIRED (a guest), 400 VALIDATION_FAILED (the note), 404 VERDICT_PRODUCT_NOT_FOUND (the entry is not a product of the verdict the person would be served right now:
+// ready, and built from the inputs as they are now; a pending or stale verdict has none). Answers 201 { id } for a new report and 200 { id } for an update of the report for the
+// same entry and verdict. Reports are read back through the repository, the only way to see them (the team reads the table).
+// The alert is not asserted here: its claim is per kind and window in the shared database, so whether this file wins the window is not up to a test (the service test pins it).
+
+// Imported when first used, so that a missing repository fails the report tests alone and not every test in this file.
+const reportsRepository = {
+  find: async (id: string) => new (await import('../../src/modules/verdicts/verdicts.reports.repository')).D1VerdictReportsRepository(db).find(id),
+}
+const reportsUrl = (entryId: string) => `${ORIGIN}/api/v1/me/verdict/products/${entryId}/reports`
+const postReport = (guest: Guest | undefined, entryId: string, body: unknown = {}) =>
+  fetchWorker(reportsUrl(entryId), {
+    method: 'POST',
+    headers: { ...(guest ? guest.headers() : { 'cf-connecting-ip': freshIp() }), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+const reportIdOf = async (res: Response) => (await dataOf<{ id: string }>(res)).id
+const failureOf = async (res: Response) => (await res.json()) as { success: false; status: number; error: { code: string } }
+
+/** A member with a goal, a clean shelf of `count` products (and a steroid cream when asked) and a verdict that has been built the way life builds one. */
+const memberWithVerdict = async (count: number, withSteroid = false) => {
+  const member = await newMember()
+  await putGoal(member)
+  await putSafety(member, { choices: ['none'] })
+  const clean: string[] = []
+  for (let i = 0; i < count; i++) clean.push(await onShelf(member))
+  const steroid = withSteroid ? await onShelf(member, [...CLEAN, STEROID_INGREDIENT]) : undefined
+  await getVerdict(member)
+  await buildQueued(member)
+  return { member, clean, steroid }
+}
+
+describe('POST /api/v1/me/verdict/products/{entryId}/reports: who may report', () => {
+  it('answers 401 AUTH_REQUIRED without a session, even for a body that would be refused', async () => {
+    const res = await postReport(undefined, crypto.randomUUID(), { note: 'x'.repeat(600) })
+
+    expect(res.status).toBe(401)
+    expect(await res.json()).toMatchObject({ success: false, status: 401, error: { code: 'AUTH_REQUIRED' } })
+  })
+
+  it('answers a guest 403 SIGNUP_REQUIRED, even for a note that is too long, and stores nothing', async () => {
+    const guest = await newGuest()
+
+    const res = await postReport(guest, crypto.randomUUID(), { note: 'x'.repeat(600) })
+
+    expect(res.status).toBe(403)
+    expect(await res.json()).toMatchObject({ success: false, status: 403, error: { code: 'SIGNUP_REQUIRED' } })
+  })
+})
+
+describe('POST /api/v1/me/verdict/products/{entryId}/reports: reporting a product of the verdict', () => {
+  it('answers 201 with the new report\'s id in the success envelope, and stores what the person was shown: the product\'s group and verdict, the note and the verdict\'s fingerprint', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+
+    const res = await postReport(member, clean[0]!, { note: 'This is not my cream' })
+
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as { data: { id: string } }
+    expect(body).toEqual({ success: true, status: 201, message: expect.any(String), data: { id: expect.any(String) } })
+    const stored = await reportsRepository.find(body.data.id)
+    expect(stored).toMatchObject({
+      profileId: member.profileId,
+      entryId: clean[0],
+      kind: 'mistake',
+      group: 'helping',
+      verdict: { kind: 'keep' },
+      basis: null,
+      note: 'This is not my cream',
+      fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+      oldProductId: null,
+      newProductId: null,
+    })
+  })
+
+  it('stores a stopped product with its step-down\'s code, so the verdict can be reproduced', async () => {
+    const { member, steroid } = await memberWithVerdict(1, true)
+
+    const res = await postReport(member, steroid!, { note: 'I stopped this long ago' })
+
+    expect(res.status).toBe(201)
+    expect(await reportsRepository.find(await reportIdOf(res))).toMatchObject({ entryId: steroid, group: 'likely-the-problem', verdict: { kind: 'stop', taperTemplateId: STEROID_TAPER } })
+  })
+
+  it('answers 200 with the same id when the same product is reported again for the same verdict, and keeps the latest note', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+    const first = await postReport(member, clean[0]!, { note: 'first thoughts' })
+    expect(first.status).toBe(201)
+    const id = await reportIdOf(first)
+
+    const again = await postReport(member, clean[0]!, { note: 'second thoughts' })
+
+    expect(again.status).toBe(200)
+    expect(await again.json()).toEqual({ success: true, status: 200, message: expect.any(String), data: { id } })
+    expect(await reportsRepository.find(id)).toMatchObject({ note: 'second thoughts' })
+  })
+
+  it('answers 201 with a new id for the same product once the verdict has been rebuilt, and keeps the first report', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+    const first = await postReport(member, clean[0]!, { note: 'before the rebuild' })
+    const firstId = await reportIdOf(first)
+    await onShelf(member)
+    await getVerdict(member)
+    await buildQueued(member)
+
+    const second = await postReport(member, clean[0]!, { note: 'after the rebuild' })
+
+    expect(second.status).toBe(201)
+    const secondId = await reportIdOf(second)
+    expect(secondId).not.toBe(firstId)
+    const [before, after] = [await reportsRepository.find(firstId), await reportsRepository.find(secondId)]
+    expect(before).toMatchObject({ note: 'before the rebuild' })
+    expect(after).toMatchObject({ note: 'after the rebuild' })
+    expect(after!.fingerprint).not.toBe(before!.fingerprint)
+  })
+
+  it('never changes the verdict: the same body is served after the report, and no new build is queued', async () => {
+    const { member, clean } = await memberWithVerdict(2)
+    const before = await dataOf<VerdictBody>(await getVerdict(member))
+    const queuedBefore = queuedFor(member).length
+
+    expect((await postReport(member, clean[0]!, { note: 'wrong' })).status).toBe(201)
+
+    expect(await dataOf(await getVerdict(member))).toEqual(before)
+    expect(queuedFor(member)).toHaveLength(queuedBefore)
+  })
+})
+
+describe('POST /api/v1/me/verdict/products/{entryId}/reports: the note', () => {
+  it('keeps a note of exactly 500 characters, answers 201 for 500 characters with spaces around them and stores them trimmed, and refuses 501 with 400 VALIDATION_FAILED', async () => {
+    const { member, clean } = await memberWithVerdict(3)
+
+    const exact = await postReport(member, clean[0]!, { note: 'a'.repeat(500) })
+    const padded = await postReport(member, clean[1]!, { note: `  ${'b'.repeat(500)}\n` })
+    const over = await postReport(member, clean[2]!, { note: 'c'.repeat(501) })
+
+    expect(exact.status).toBe(201)
+    expect((await reportsRepository.find(await reportIdOf(exact)))!.note).toBe('a'.repeat(500))
+    expect(padded.status).toBe(201)
+    expect((await reportsRepository.find(await reportIdOf(padded)))!.note).toBe('b'.repeat(500))
+    expect(over.status).toBe(400)
+    expect((await failureOf(over)).error.code).toBe('VALIDATION_FAILED')
+  })
+
+  it.each([
+    ['no note', {}],
+    ['an empty note', { note: '' }],
+    ['a note of spaces', { note: '   ' }],
+  ])('answers 201 for %s and stores a null note', async (_label, body) => {
+    const { member, clean } = await memberWithVerdict(1)
+
+    const res = await postReport(member, clean[0]!, body)
+
+    expect(res.status).toBe(201)
+    expect((await reportsRepository.find(await reportIdOf(res)))!.note).toBeNull()
+  })
+
+  it.each([
+    ['a note that is not text', { note: 12 }],
+    ['a null note', { note: null }],
+    ['a field it does not know', { note: 'fine', entryId: 'other' }],
+  ])('answers 400 VALIDATION_FAILED for %s', async (_label, body) => {
+    const { member, clean } = await memberWithVerdict(1)
+
+    const res = await postReport(member, clean[0]!, body)
+
+    expect(res.status).toBe(400)
+    expect((await failureOf(res)).error.code).toBe('VALIDATION_FAILED')
+  })
+
+  it('looks at the note before the entry: a note that is too long for an entry that is not in the verdict gets 400, not 404', async () => {
+    const { member } = await memberWithVerdict(1)
+
+    const res = await postReport(member, crypto.randomUUID(), { note: 'x'.repeat(501) })
+
+    expect(res.status).toBe(400)
+    expect((await failureOf(res)).error.code).toBe('VALIDATION_FAILED')
+  })
+})
+
+describe('POST /api/v1/me/verdict/products/{entryId}/reports: a product that is not in the verdict being served', () => {
+  it('answers 404 VERDICT_PRODUCT_NOT_FOUND in the failure envelope for an entry the verdict does not hold', async () => {
+    const { member } = await memberWithVerdict(1)
+
+    const res = await postReport(member, crypto.randomUUID(), { note: 'x' })
+
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ success: false, status: 404, error: { code: 'VERDICT_PRODUCT_NOT_FOUND' } })
+  })
+
+  it('answers 404 for another profile\'s entry, and stores nothing for either', async () => {
+    const mine = await memberWithVerdict(1)
+    const theirs = await memberWithVerdict(1)
+
+    const res = await postReport(mine.member, theirs.clean[0]!, { note: 'x' })
+
+    expect(res.status).toBe(404)
+    expect((await failureOf(res)).error.code).toBe('VERDICT_PRODUCT_NOT_FOUND')
+  })
+
+  it('answers 404 while the verdict is pending, for an entry that is on the shelf', async () => {
+    const member = await newMember()
+    await putGoal(member)
+    await putSafety(member, { choices: ['none'] })
+    const entryId = await onShelf(member)
+    await getVerdict(member)
+
+    const res = await postReport(member, entryId, { note: 'x' })
+
+    expect(res.status).toBe(404)
+    expect((await failureOf(res)).error.code).toBe('VERDICT_PRODUCT_NOT_FOUND')
+  })
+
+  it('answers 404 for a product of a verdict that is stale: the shelf changed after it was built, and it is not served as if it were current', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+    await onShelf(member)
+
+    const res = await postReport(member, clean[0]!, { note: 'x' })
+
+    expect(res.status).toBe(404)
+    expect((await failureOf(res)).error.code).toBe('VERDICT_PRODUCT_NOT_FOUND')
+  })
+})
+
+describe('POST /api/v1/me/verdict/products/{entryId}/reports: the note stays private', () => {
+  const PRIVATE = 'QZ-PRIVATE-NOTE-7731'
+
+  it('is in no console output, queued message, outbound request or later response, whether the report is new, updated or refused', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+    const spies = (['log', 'debug', 'info', 'warn', 'error'] as const).map((level) => vi.spyOn(console, level).mockImplementation(() => {}))
+    // A report makes no outbound call of its own: any would fail here.
+    const outbound: string[] = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      outbound.push(String(input))
+      throw new Error('no outbound request is expected')
+    })
+
+    const responses = [
+      await postReport(member, clean[0]!, { note: PRIVATE }),
+      await postReport(member, clean[0]!, { note: `${PRIVATE} again` }),
+      await postReport(member, crypto.randomUUID(), { note: PRIVATE }),
+      await postReport(member, clean[0]!, { note: PRIVATE.repeat(30) }),
+    ]
+    vi.unstubAllGlobals()
+
+    expect(responses.map((res) => res.status)).toEqual([201, 200, 404, 400])
+    expect(outbound).toEqual([])
+    for (const res of responses) expect(await res.clone().text()).not.toContain(PRIVATE)
+    expect(JSON.stringify(spies.flatMap((spy) => spy.mock.calls))).not.toContain(PRIVATE)
+    expect(JSON.stringify({ email: emailQueued, verdicts: verdictsQueued, parse: parseQueued })).not.toContain(PRIVATE)
+  })
+
+  it('is not sent to the fit judge when the verdict is rebuilt after a report, and is in no verdict body', async () => {
+    const { member, clean } = await memberWithVerdict(1)
+    expect((await postReport(member, clean[0]!, { note: PRIVATE })).status).toBe(201)
+    await onShelf(member)
+    await getVerdict(member)
+
+    const calls = await buildQueued(member)
+
+    expect(calls.length).toBeGreaterThan(0)
+    expect(JSON.stringify(calls.map((call) => call.body))).not.toContain(PRIVATE)
+    expect(JSON.stringify(await dataOf(await getVerdict(member)))).not.toContain(PRIVATE)
+    expect(JSON.stringify(verdictsQueued)).not.toContain(PRIVATE)
   })
 })

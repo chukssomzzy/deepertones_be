@@ -6,7 +6,7 @@ import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { sendOpsAlertSpec } from './ops-alerts.job-specs'
 import { FakeOpsAlertsRepository } from './ops-alerts.repository.fake'
 import { OpsAlertsService } from './ops-alerts.service'
-import type { OpsAlertKind } from './ops-alerts.types'
+import { OPS_ALERT_KINDS, type OpsAlertKind } from './ops-alerts.types'
 
 // The repository contract (fake and D1) is mounted by ops-alerts.repository.test.ts and its integration twin.
 
@@ -19,8 +19,8 @@ const HOUR_START = new Date(DAY_START.getTime() + 12 * HOUR)
 const T0 = new Date(HOUR_START.getTime() + 30 * MINUTE)
 const RECIPIENT = 'ops@example.com'
 
-const HOURLY: OpsAlertKind[] = ['ai-account']
-const DAILY: OpsAlertKind[] = ['ai-spend-cap', 'research-budget', 'analysis-budget']
+const HOURLY: OpsAlertKind[] = ['ai-account', 'share-render-quota']
+const DAILY: OpsAlertKind[] = ['ai-spend-cap', 'research-budget', 'analysis-budget', 'verdict-report', 'wrong-match-report']
 
 const setup = (options: { recipient?: string; repository?: FakeOpsAlertsRepository } = {}) => {
   let clock = T0
@@ -97,8 +97,11 @@ describe('OpsAlertsService.raise', () => {
     await service.raise('ai-spend-cap')
     await service.raise('research-budget')
     await service.raise('analysis-budget')
+    await service.raise('verdict-report')
+    await service.raise('wrong-match-report')
+    await service.raise('share-render-quota')
 
-    expect(alertsQueued(jobs).map((a) => a.kind).sort()).toEqual(['ai-account', 'ai-spend-cap', 'analysis-budget', 'research-budget'])
+    expect(alertsQueued(jobs).map((a) => a.kind).sort()).toEqual(['ai-account', 'ai-spend-cap', 'analysis-budget', 'research-budget', 'share-render-quota', 'verdict-report', 'wrong-match-report'])
   })
 
   describe('the hourly window', () => {
@@ -194,6 +197,94 @@ describe('OpsAlertsService.raise', () => {
   })
 })
 
+describe('the kinds added with verdict reports and sharing (spec #259)', () => {
+  it('names verdict-report, wrong-match-report and share-render-quota among the kinds', () => {
+    expect(OPS_ALERT_KINDS).toContain('verdict-report')
+    expect(OPS_ALERT_KINDS).toContain('wrong-match-report')
+    expect(OPS_ALERT_KINDS).toContain('share-render-quota')
+  })
+
+  describe('share-render-quota is an hourly alert', () => {
+    it('queues its job in the window of the hour it was raised in', async () => {
+      const { service, jobs } = setup()
+
+      await service.raise('share-render-quota')
+
+      expect(alertsQueued(jobs)).toEqual([
+        { job: 'send-ops-alert', kind: 'share-render-quota', windowStart: HOUR_START.getTime(), key: `share-render-quota:${HOUR_START.getTime()}` },
+      ])
+    })
+
+    it('still dedupes at the last millisecond of the hour', async () => {
+      const { service, jobs, at } = setup()
+      await service.raise('share-render-quota')
+
+      at(new Date(HOUR_START.getTime() + HOUR - 1))
+      await service.raise('share-render-quota')
+
+      expect(jobs.enqueued).toHaveLength(1)
+    })
+
+    it('sends again at the first millisecond of the next hour, for that hour\'s window', async () => {
+      const { service, jobs, at } = setup()
+      await service.raise('share-render-quota')
+
+      at(new Date(HOUR_START.getTime() + HOUR))
+      await service.raise('share-render-quota')
+
+      expect(alertsQueued(jobs).map((a) => a.windowStart)).toEqual([HOUR_START.getTime(), HOUR_START.getTime() + HOUR])
+    })
+  })
+
+  describe.each(['verdict-report', 'wrong-match-report'] as const)('%s is a daily alert', (kind) => {
+    it('dedupes across the hours of a UTC day and sends again at midnight', async () => {
+      const { service, jobs, at } = setup()
+      await service.raise(kind)
+
+      at(new Date(DAY_START.getTime() + DAY - 1))
+      await service.raise(kind)
+      expect(jobs.enqueued).toHaveLength(1)
+
+      at(new Date(DAY_START.getTime() + DAY))
+      await service.raise(kind)
+      expect(alertsQueued(jobs).map((a) => a.windowStart)).toEqual([DAY_START.getTime(), DAY_START.getTime() + DAY])
+    })
+  })
+
+  describe('the emails', () => {
+    const window = { windowStart: HOUR_START.getTime() }
+
+    it.each(['verdict-report', 'wrong-match-report'] as const)('tells the team in the %s email that reports have arrived and to read them with a query on verdict_reports', async (kind) => {
+      const { service, email } = setup()
+
+      await service.send({ kind, ...window })
+
+      expect(email.sent[0]!.text).toContain('verdict_reports')
+    })
+
+    it('says in the share-render-quota email that the free allowance of 5,000 unique transformations on Cloudflare Images is used up, that new share cards are refused until it resets, and to turn on Images Paid', async () => {
+      const { service, email } = setup()
+
+      await service.send({ kind: 'share-render-quota', ...window })
+
+      const text = email.sent[0]!.text
+      expect(text).toContain('Cloudflare Images')
+      expect(text).toContain('5,000')
+      expect(text).toContain('Images Paid')
+    })
+
+    it.each(['verdict-report', 'wrong-match-report', 'share-render-quota'] as const)('writes the %s email the same for every window: the text is fixed and carries no product, profile or note', async (kind) => {
+      const { service, email } = setup()
+
+      await service.send({ kind, windowStart: DAY_START.getTime() })
+      await service.send({ kind, windowStart: DAY_START.getTime() + DAY })
+
+      expect(email.sent[0]!.text).toBe(email.sent[1]!.text)
+      expect(email.sent[0]!.subject).toBe(email.sent[1]!.subject)
+    })
+  })
+})
+
 describe('OpsAlertsService.send', () => {
   const window = { windowStart: HOUR_START.getTime() }
 
@@ -223,7 +314,7 @@ describe('OpsAlertsService.send', () => {
 
     for (const kind of [...HOURLY, ...DAILY]) await service.send({ kind, ...window })
 
-    expect(new Set(email.sent.map((m) => m.text)).size).toBe(4)
+    expect(new Set(email.sent.map((m) => m.text)).size).toBe(HOURLY.length + DAILY.length)
   })
 
   it('writes the same text for a kind whatever window it is for: the text is fixed and carries no data', async () => {

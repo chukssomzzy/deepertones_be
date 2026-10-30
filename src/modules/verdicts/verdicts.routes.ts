@@ -1,7 +1,7 @@
-import { defineRoute, errorResponses, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
+import { defineRoute, errorResponses, jsonBody, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
 import { signedIn } from '../../middleware/signed-in'
 import { toShelfVerdictResponse } from './verdicts.view'
-import { ShelfVerdictResponse } from './verdicts.schemas'
+import { ShelfVerdictResponse, VerdictReportBody, VerdictReportParams, VerdictReportResponse } from './verdicts.schemas'
 
 const bearer = [{ bearerAuth: [] }]
 
@@ -44,6 +44,31 @@ const watchVerdict = defineRoute({
   responses: { 200: sseResponse('The event stream'), ...errorResponses(401, 409, 503) },
 })
 
+const reportMistake = defineRoute({
+  method: 'post',
+  path: '/verdict/products/{entryId}/reports',
+  operationId: 'reportVerdictMistake',
+  tags: ['Verdict'],
+  summary: 'Tell the team a product\'s verdict looks wrong',
+  description:
+    'For a signed-up account. Stores a report for the team to read and changes nothing the person sees: the verdict stays as it is. The product must be one of the verdict the person is served now, which is a ready verdict built from the shelf, answers, goal and rules as they are now: ' +
+    'a pending or out-of-date verdict has none, so every entry is 404 `VERDICT_PRODUCT_NOT_FOUND`. The checks run in this order: 401 without a session; 400 `VALIDATION_FAILED` for a malformed body (a field other than `note`, or a `note` that is not text); 403 `SIGNUP_REQUIRED` for a guest; 400 `VALIDATION_FAILED` for a `note` over 500 characters once trimmed; then 404. Send `{}` to report with no note. ' +
+    '201 with the new report\'s `id`; 200 with the same `id` when the same product was already reported on the same verdict, which replaces its note.',
+  security: bearer,
+  // An unsigned caller is turned away before the body is checked, so a bodiless request answers 401 and not 400.
+  middleware: [signedIn()],
+  request: { params: VerdictReportParams, body: jsonBody(VerdictReportBody) },
+  responses: {
+    200: success(VerdictReportResponse, 'The product had been reported on this verdict: its report was updated'),
+    201: success(VerdictReportResponse, 'The report was stored'),
+    ...errorResponses(400, 401, 403, 404),
+  },
+})
+
 export const verdictsRoutes = openapiApp()
   .openapi(getVerdict, async (c) => ok(c, toShelfVerdictResponse(await c.var.services.verdicts.current()), 'Shelf verdict'))
   .openapi(watchVerdict, async (c) => c.var.services.verdicts.watch())
+  .openapi(reportMistake, async (c) => {
+    const { id, created } = await c.var.services.verdictReports.reportMistake(c.req.valid('param').entryId, c.req.valid('json').note)
+    return created ? ok(c, { id }, 'Report stored', 201) : ok(c, { id }, 'Report updated')
+  })

@@ -7,6 +7,7 @@ import type { RoutineRetry } from '../../providers/routine-writing/routine-write
 import type { ProductCatalogService, ShelfFacts } from '../catalog/catalog.service'
 import type { RoutineStep } from '../catalog/catalog.vocabulary'
 import type { CatalogWorkbookService } from '../catalog/catalog.workbook.service'
+import type { TaperRow } from '../catalog/catalog.workbook.schema'
 import type { FaceScanService } from '../face-scans/face-scans.service'
 import type { GoalsService } from '../goals/goals.service'
 import type { Goal } from '../goals/goals.vocabulary'
@@ -109,6 +110,12 @@ type World = {
   safety: { view: SafetyView | null; parseState: ParseState | null; mentions: SafetyMentionRow[] }
   shopping: { country: string; budgetBand: 'low' | 'mid' | 'high' | null } | null
   entries: ShelfActiveEntry[]
+  /** The profile's soft-removed shelf entries, as the shelf service gives them (#259 B4): the entry's id and the reason it was removed with. A reason is text so a test can name one the product has not got yet. */
+  removed: { id: string; reason: string | null }[]
+  /** The catalog product of a removed entry, by entry id: only the tests that put a removed product back on the shelf set one. */
+  removedProducts: Map<string, string>
+  /** The step-down templates the workbook holds, by code. */
+  templates: Map<string, TaperRow>
   facts: Map<string, ShelfFacts>
   candidates: Record<NG_OR_GH, Partial<Record<RoutineStep, Candidate[]>>>
   seen: Awaited<ReturnType<FaceScanService['seenFor']>>
@@ -164,6 +171,24 @@ const verdictProduct = (entryId: string, verdict: ShelfVerdict, step: RoutineSte
   ...over,
 })
 
+/** A step-down template whose last week is `lastWeek`, the only thing the carry reads: the last step ends on it. */
+const taperTemplate = (code: string, lastWeek: number): TaperRow => ({
+  code,
+  kind: 'steroid',
+  schedule: [
+    { fromWeek: 1, toWeek: lastWeek - 1, frequency: 'alternate-days' },
+    { fromWeek: lastWeek, toWeek: lastWeek, frequency: 'stop' },
+  ],
+  whatToExpect: 'Skin may flare for a few days.',
+  seeAProfessionalIf: 'The redness spreads.',
+  status: 'approved',
+  approvedBy: 'Dr A. Reviewer',
+  approvedOn: new Date('2030-01-01T00:00:00.000Z'),
+  auditedBy: null,
+  auditedOn: null,
+})
+const STEROID_TEMPLATE = taperTemplate('TPR-STEROID-1', 4)
+
 const newWorld = (): World => ({
   saved: {
     fingerprint: 'verdict-fp-1',
@@ -179,6 +204,9 @@ const newWorld = (): World => ({
   safety: { view: safetyView(['reaction']), parseState: 'done', mentions: [] },
   shopping: { country: 'NG', budgetBand: 'mid' },
   entries: [],
+  removed: [],
+  removedProducts: new Map(),
+  templates: new Map([[STEROID_TEMPLATE.code, STEROID_TEMPLATE]]),
   facts: new Map(),
   // Cheapest first, as the recommendation rules give them. SERUM-1 is sold in NG only.
   candidates: {
@@ -385,6 +413,8 @@ beforeEach(() => {
     safety: { snapshotFor: async () => structuredClone(world.safety) } satisfies Pick<SafetyService, 'snapshotFor'>,
     shelf: {
       activeEntriesFor: async () => structuredClone(world.entries),
+      removedEntriesFor: async () => structuredClone(world.removed) as Awaited<ReturnType<ShelfService['removedEntriesFor']>>,
+      removedProductIdsFor: async (_profileId: string, entryIds: string[]) => new Map(entryIds.flatMap((id): [string, string][] => (world.removedProducts.has(id) ? [[id, world.removedProducts.get(id)!]] : []))),
       add: async (productId: string, clientIp: string) => {
         world.actors.push(currentActor())
         requireUser()
@@ -392,16 +422,18 @@ beforeEach(() => {
         await world.duringAdd?.()
         return { status: 'started' as const, scanId: 'scan-1', itemId: 'item-1' }
       },
-    } satisfies Pick<ShelfService, 'activeEntriesFor' | 'add'>,
+    } satisfies Pick<ShelfService, 'activeEntriesFor' | 'removedEntriesFor' | 'removedProductIdsFor' | 'add'>,
     catalog: {
       shelfFacts: async (formulationIds: string[]) => new Map(formulationIds.flatMap((id): [string, ShelfFacts][] => (world.facts.has(id) ? [[id, structuredClone(world.facts.get(id)!)]] : []))),
     } satisfies Pick<ProductCatalogService, 'shelfFacts'>,
     faceScans: { seenFor: async () => structuredClone(world.seen) } satisfies Pick<FaceScanService, 'seenFor'>,
     workbook: {
       countries: async () => structuredClone(world.countries),
+      // The step-down templates the carry reads the length of (#259 B4); a code the workbook does not hold is absent from the map.
+      tapersByCode: async (codes: string[]) => new Map(codes.flatMap((code): [string, TaperRow][] => (world.templates.has(code) ? [[code, structuredClone(world.templates.get(code)!)]] : []))),
       // Where the catalog version a routine records comes from.
       verdictReference: async () => ({ rulesVersion: 'verdict-rules-7', catalogVersion, rules: [], claimPhrases: [], claimWords: [], tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } }),
-    } satisfies Pick<CatalogWorkbookService, 'countries' | 'verdictReference'>,
+    } satisfies Pick<CatalogWorkbookService, 'countries' | 'verdictReference' | 'tapersByCode'>,
     profiles: {
       find: async (profileId: string) => {
         const userId = world.profiles.get(profileId)
@@ -3793,5 +3825,412 @@ describe('RoutineService.gotIt: changedOn', () => {
     const row = await latestRow()
     expect(row.steps[1]).toMatchObject({ step: 'treat', product: { kind: 'shelf', id: 'entry-s' } })
     expect(changedOnOf(row)).toEqual([null, dateAt(4), null, null])
+  })
+})
+
+// ---- a running step-down survives its product's removal (#259 B4) ----
+// A shelf product with a stop verdict is stepped down, never stopped suddenly (CONTEXT.md). Taking it off the shelf in the app does not end the person's use of it, so the rebuild
+// the removal triggers keeps the step-down: same `startedOn`, same template. New dependencies, assumed by this block: `shelf.removedEntriesFor(profileId)` (the entry's id and the
+// reason it was removed with, or null) and `workbook.tapersByCode(codes)` (the template, whose last schedule week says when the step-down ends). The step-down is carried when
+// ALL hold on a rebuild of a STARTED routine: the entry was removed with no reason or `finished` (an allow-list: `stopped`, `not-mine` and any reason added later end it),
+// the step-down had started (`startedOn` set), and its last week has not passed on the person's LOCAL day. A step-down started on day D whose template ends in week W runs
+// through day D + 7W - 1, the last day the viewer calls it running (routines.view stepDownProgressOf), and is gone from the rebuild on D + 7W.
+// The days below are calendar offsets from DAY_ONE (the 18th, when Start was tapped on the 17th); the clock sits at noon UTC unless a test says otherwise.
+describe('RoutineService.build: a running step-down survives its product\'s removal', () => {
+  const dayOf = (n: number) => new Date(DAY_ONE.getTime() + n * DAY)
+  /** The clock at `hours` UTC on the day `n` days after the step-down began. */
+  const onDay = (n: number, hours = 12) => {
+    clock = new Date(dayOf(n).getTime() + hours * HOUR)
+  }
+  /** The stopped cream is taken off the shelf (so the verdict no longer names it), with the reason the app recorded. */
+  const removeSteroid = (reason: string | null) => {
+    world.removed.push({ id: 'entry-b', reason })
+    removeShelfProduct('entry-b')
+  }
+  const CARRIED = [{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }]
+  /** The routine Started, and the step-down it carries, as life leaves them. */
+  const startedWithTaper = async () => {
+    const before = await started()
+    expect(before.tapers).toEqual(CARRIED)
+    return before
+  }
+
+  it.each([
+    ['no reason', null],
+    ['finished', 'finished'],
+  ])('keeps the step-down, with its start date and template, when its product was removed as %s two weeks in', async (_name, reason) => {
+    await startedWithTaper()
+    removeSteroid(reason)
+    onDay(14)
+
+    await build('shelf')
+
+    expect((await currentRow()).tapers).toEqual(CARRIED)
+  })
+
+  it.each([
+    ['stopped', 'stopped'],
+    ['not-mine', 'not-mine'],
+    ['a reason added later (wrong-product)', 'wrong-product'],
+  ])('ends the step-down when its product was removed as %s: only no reason or finished keeps it', async (_name, reason) => {
+    await startedWithTaper()
+    removeSteroid(reason)
+    onDay(14)
+
+    await build('shelf')
+
+    expect((await currentRow()).tapers).toEqual([])
+  })
+
+  it('changes nothing else when only the step-down is kept: the writer is not asked and every step stays', async () => {
+    const before = await startedWithTaper()
+    removeSteroid(null)
+    onDay(14)
+
+    await build('shelf')
+
+    const after = await currentRow()
+    expect(attempts).toBe(1)
+    expect(shapeOf(after)).toEqual(shapeOf(before))
+    expect(after.startedOn).toEqual(before.startedOn)
+    expect(after.tapers).toEqual(CARRIED)
+  })
+
+  // The last day a 4-week step-down runs is day 27 (D + 28 - 1); a 6-week one, day 41. The day after, the next rebuild drops it. The length is the template's own.
+  it.each([
+    ['a 4-week template, on its last day', 4, 27, true],
+    ['a 4-week template, the day after its last week', 4, 28, false],
+    ['a 6-week template, on its last day', 6, 41, true],
+    ['a 6-week template, the day after its last week', 6, 42, false],
+    ['a 6-week template, where a 4-week one would have ended', 6, 28, true],
+  ])('reads the template\'s schedule: with %s the removed step-down is carried only while its last week has not passed', async (_name, lastWeek, day, carried) => {
+    await startedWithTaper()
+    world.templates.set('TPR-STEROID-1', taperTemplate('TPR-STEROID-1', lastWeek))
+    removeSteroid(null)
+    onDay(day)
+
+    await build('shelf')
+
+    expect((await currentRow()).tapers).toEqual(carried ? CARRIED : [])
+  })
+
+  it('carries it from the first day of the schedule: removed on the very day it began', async () => {
+    await startedWithTaper()
+    removeSteroid('finished')
+    onDay(0, 1)
+
+    await build('shelf')
+
+    expect((await currentRow()).tapers).toEqual(CARRIED)
+  })
+
+  it('judges the last week on the person\'s local day: Auckland is already on the next day when UTC is not', async () => {
+    world.zone = 'Pacific/Auckland'
+    const before = await started()
+    // Tapped 2030-06-17 12:00 UTC, 00:00 on the 18th in Auckland (UTC+12): Auckland day 1 is the 19th.
+    expect(before.startedOn).toEqual(dateAt(4))
+    removeSteroid(null)
+    // 22:00 on day 27 in Auckland is 10:00 UTC the same date: still the last day.
+    clock = new Date(before.startedOn!.getTime() + 27 * DAY + 10 * HOUR)
+    await build('shelf')
+    expect((await currentRow()).tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: before.startedOn }])
+
+    // 20:00 UTC on day 27 is 08:00 on day 28 in Auckland: past the last week, though the UTC date is still day 27.
+    clock = new Date(before.startedOn!.getTime() + 27 * DAY + 20 * HOUR)
+    reverdict()
+    await build('shelf')
+    expect((await currentRow()).tapers).toEqual([])
+  })
+
+  it('drops a carried step-down at the first rebuild after its last week has passed, though it was carried before', async () => {
+    await startedWithTaper()
+    removeSteroid(null)
+    onDay(14)
+    await build('shelf')
+    expect((await currentRow()).tapers).toEqual(CARRIED)
+
+    reverdict()
+    onDay(28)
+    await build('verdict')
+
+    expect((await currentRow()).tapers).toEqual([])
+  })
+
+  it('does not drop a stopped product that is still on the shelf after its last week: only a removed product\'s step-down ends with its schedule', async () => {
+    await startedWithTaper()
+    reverdict()
+    onDay(70)
+
+    await build('verdict')
+
+    expect((await currentRow()).tapers).toEqual(CARRIED)
+  })
+
+  it('does not carry the step-down of a routine that was never Started', async () => {
+    await firstBuild()
+    removeSteroid(null)
+    setClock(DAY)
+
+    await build('shelf')
+
+    const row = await currentRow()
+    expect(row.startedOn).toBeNull()
+    expect(row.tapers).toEqual([])
+  })
+
+  // No real path leaves a Started version with an undated step-down (Start and every rebuild date them), so this version is a legacy shape written straight to the repository.
+  // The failure it guards is a carried step-down being dated by the rebuild: a step-down that never began must not begin because the person took its product off the shelf.
+  it('does not carry a step-down that never started, and so does not start it on the day of the rebuild', async () => {
+    const before = await startedWithTaper()
+    await repository.append({ ...before, id: 'version-legacy', createdAt: at(3 * DAY), readyAt: at(3 * DAY), tapers: [{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: null }] })
+    removeSteroid(null)
+    onDay(14)
+
+    await build('shelf')
+
+    expect((await currentRow()).tapers).toEqual([])
+  })
+
+  it('keeps the removed step-down beside a new one: the carried one keeps its own start date, the new stop begins the day of the rebuild', async () => {
+    await startedWithTaper()
+    addProduct('entry-c', STEROID, { name: 'Second Cream' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, null, { sourceUrls: [STEROID_SOURCE] })])
+    removeSteroid(null)
+    onDay(14)
+
+    await build('shelf')
+
+    const { tapers } = await currentRow()
+    expect(tapers).toHaveLength(2)
+    expect(tapers).toEqual(expect.arrayContaining([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }, { shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: dayOf(14) }]))
+  })
+
+  // The writer's skeleton holds only the active shelf, so its answer has no step-down for the removed product; the carried one is put back in code, and the gates must accept it.
+  it('lets the writer\'s routine through the gates with the carried step-down, instead of falling back to the rules', async () => {
+    await startedWithTaper()
+    retireSerum1()
+    removeSteroid(null)
+    onDay(14)
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await currentRow()
+    expect(row).toMatchObject({ source: 'writer', writerCalls: 1 })
+    expect(row.tapers).toEqual(CARRIED)
+  })
+
+  it('keeps it too when the writer is skipped for the daily limit and the rules write the routine', async () => {
+    await startedWithTaper()
+    retireSerum1()
+    removeSteroid(null)
+    onDay(14)
+    // Five writer builds in the last day spend the allowance (the repository counts them by creation time). They are older than the routine in force in readiness, so it stays the one in force.
+    const inForce = await currentRow()
+    for (let i = 0; i < 5; i++) await repository.append({ ...inForce, id: `version-spent-${i}`, createdAt: new Date(clock.getTime() - (i + 1) * MINUTE), readyAt: at(-DAY), writerCalls: 1 })
+
+    await build('shelf')
+
+    expect(await currentRow()).toMatchObject({ source: 'rules', writerCalls: 0 })
+    expect((await currentRow()).tapers).toEqual(CARRIED)
+  })
+
+  // Finding: the fingerprint needs no reason. Taking the stopped product off the shelf removes it from the active shelf the fingerprint is made of, so the routine is stale and
+  // rebuilds; a removed entry keeps its FIRST reason, so no later change of reason can need a rebuild; and the passing of the step-down's last week is a date, not an input. It is
+  // noticed on the next read only when the carried step-down is what kept the tapering caution (the caution goes, the fingerprint moves); with another stopped product still on the
+  // shelf the caution stays, and it is noticed at the next rebuild for another reason.
+  it('is stale the moment its stopped product is removed, and settled once the rebuild has carried the step-down', async () => {
+    const before = await startedWithTaper()
+    removeSteroid(null)
+    onDay(14)
+
+    await runAs(AMARA_ACTOR, () => service.requestIfStale(AMARA_PROFILE))
+    expect(queued()).toHaveLength(1)
+    const asked = queuedBody().requestKey
+
+    await build('shelf')
+
+    const after = await currentRow()
+    expect(after.routineFingerprint).not.toBe(before.routineFingerprint)
+    // What the read asked for is exactly what the rebuild recorded: nothing about the removed entry or its reason is in it, so the read asks for nothing more.
+    expect(after.routineFingerprint).toBe(asked)
+    expect(after.routineFingerprint).toBe(
+      await routineFingerprint({ goal: 'fade-dark-marks', cautions: after.cautions!, products: [{ entryId: 'entry-a', verdict: { kind: 'keep' }, step: 'cleanse' }], rulesVersion: ROUTINE_RULES_VERSION }),
+    )
+  })
+
+  // The product is off the shelf, so nothing but the routine itself can name it: the version keeps the title, status and reason the product was left out with, so the viewer titles
+  // the running step-down as it always did instead of "A product you're stepping down". Both ways a rebuild writes: appended, or the current row's list set in place.
+  describe('the title it was built with', () => {
+    const listOfEntryB = (row: Row) => row.notInRoutine?.filter(({ entryId }) => entryId === 'entry-b')
+
+    it('is kept when the rebuild only keeps the routine and sets its list in place', async () => {
+      const before = await startedWithTaper()
+      expect(listOfEntryB(before)).toHaveLength(1)
+      removeSteroid(null)
+      onDay(14)
+
+      await build('shelf')
+
+      const after = await currentRow()
+      expect(after.id).toBe(before.id)
+      expect(listOfEntryB(after)).toEqual(listOfEntryB(before))
+    })
+
+    it('is kept when the rebuild appends a version written from the writer\'s routine', async () => {
+      const before = await startedWithTaper()
+      retireSerum1()
+      removeSteroid(null)
+      onDay(14)
+
+      await build('shelf')
+
+      const after = await currentRow()
+      expect(after.id).not.toBe(before.id)
+      expect(listOfEntryB(after)).toEqual(listOfEntryB(before))
+    })
+
+    it('is not listed once the step-down has ended', async () => {
+      await startedWithTaper()
+      removeSteroid('stopped')
+      onDay(14)
+
+      await build('shelf')
+
+      expect(listOfEntryB(await currentRow())).toEqual([])
+    })
+  })
+
+  // The tapering caution is the app saying a step-down is under way; it stands while a carried one runs, though no product on the shelf is stopped. The stale read asks the same
+  // question as the build, or its key never matches what the build recorded and every read would queue another build.
+  describe('the tapering caution', () => {
+    it('stands while a carried step-down runs, and goes with it', async () => {
+      await startedWithTaper()
+      removeSteroid(null)
+      onDay(14)
+      await build('shelf')
+      expect((await currentRow()).cautions).toContain('tapering')
+
+      reverdict()
+      onDay(28)
+      await build('verdict')
+
+      expect((await currentRow()).tapers).toEqual([])
+      expect((await currentRow()).cautions).not.toContain('tapering')
+    })
+
+    it('does not make the routine stale again once the rebuild has stored it, so a read queues nothing more', async () => {
+      await startedWithTaper()
+      removeSteroid(null)
+      onDay(14)
+      await requestIfStale()
+      await run(queuedBody())
+      expect((await currentRow()).cautions).toContain('tapering')
+
+      await requestIfStale()
+
+      expect(queued()).toHaveLength(1)
+    })
+
+    it('notices the end of the step-down on the read: the caution it kept is gone, so the routine is stale', async () => {
+      await startedWithTaper()
+      removeSteroid(null)
+      onDay(14)
+      await build('shelf')
+      onDay(28)
+
+      await requestIfStale()
+
+      expect(queued()).toHaveLength(1)
+    })
+  })
+
+  // The owner's rule (2026-10-29): a product whose step-down is being carried and that is put back on the shelf (a new entry of the same product, stopped on the same template)
+  // CONTINUES that step-down. The new entry takes the carried one's start date (the same week), the carried copy for the removed entry is dropped, and there is one step-down under
+  // the product's real name. It never begins again at week 1.
+  describe('the product put back on the shelf', () => {
+    const putBack = (id = 'entry-d', verdict: ShelfVerdict = { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, productId = 'prod-entry-b') => {
+      world.removedProducts.set('entry-b', 'prod-entry-b')
+      addProduct(id, STEROID, { productId })
+      world.entries = world.entries.map((entry) => (entry.id === id && entry.kind === 'product' ? { ...entry, productId } : entry))
+      saveVerdict([...productsOfVerdict(), verdictProduct(id, verdict, null, { sourceUrls: [STEROID_SOURCE] })])
+    }
+
+    it('continues the step-down on the new entry, with the original start date, and drops the copy for the removed one', async () => {
+      await startedWithTaper()
+      removeSteroid(null)
+      putBack()
+      onDay(14)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([{ shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }])
+    })
+
+    it('does the same when it was removed as finished, and when the writer must be asked', async () => {
+      await startedWithTaper()
+      retireSerum1()
+      removeSteroid('finished')
+      putBack()
+      onDay(14)
+
+      await build('shelf')
+
+      expect(await currentRow()).toMatchObject({ source: 'writer', tapers: [{ shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }] })
+    })
+
+    it('begins a new step-down today when the removal ended it (stopped), whatever is put back', async () => {
+      await startedWithTaper()
+      removeSteroid('stopped')
+      putBack()
+      onDay(14)
+
+      await build('shelf')
+
+      expect((await currentRow()).tapers).toEqual([{ shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: dayOf(14) }])
+    })
+
+    it('does not continue it on a different product, nor on one stopped on another template', async () => {
+      await startedWithTaper()
+      removeSteroid(null)
+      putBack('entry-d', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, 'prod-another')
+      onDay(14)
+
+      await build('shelf')
+
+      const { tapers } = await currentRow()
+      expect(tapers).toHaveLength(2)
+      expect(tapers).toEqual(expect.arrayContaining([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }, { shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: dayOf(14) }]))
+    })
+
+    it('makes the stale read settle once the rebuild has continued it: the read asks for the rebuild, then for nothing more', async () => {
+      await startedWithTaper()
+      removeSteroid(null)
+      putBack()
+      onDay(14)
+
+      await requestIfStale()
+      expect(queued()).toHaveLength(1)
+      await run(queuedBody())
+      expect((await currentRow()).tapers).toEqual([{ shelfProductId: 'entry-d', templateId: 'TPR-STEROID-1', startedOn: DAY_ONE }])
+
+      await requestIfStale()
+
+      expect(queued()).toHaveLength(1)
+    })
+  })
+
+  it('does not append a copy version for a reorder alone: a carried step-down listed after the shelf\'s own is the same routine', async () => {
+    addProduct('entry-c', STEROID, { name: 'Second Cream' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, null, { sourceUrls: [STEROID_SOURCE] })])
+    const before = await started()
+    expect(before.tapers.map((t) => t.shelfProductId)).toEqual(['entry-b', 'entry-c'])
+    removeSteroid(null)
+    onDay(14)
+
+    expect(await build('shelf')).toBe('unchanged')
+
+    const after = await currentRow()
+    expect(after.id).toBe(before.id)
+    expect(after.tapers).toEqual(before.tapers)
   })
 })
