@@ -1052,6 +1052,20 @@
         ],
         "additionalProperties": false
       },
+      "ReplaceShelfEntryBody": {
+        "type": "object",
+        "properties": {
+          "productId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The product the entry really is, from `GET /api/v1/products/search`. Not the entry's own product."
+          }
+        },
+        "required": [
+          "productId"
+        ],
+        "additionalProperties": false
+      },
       "RemoveShelfEntryBody": {
         "type": "object",
         "properties": {
@@ -7748,6 +7762,168 @@
           },
           "404": {
             "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/shelf/{entryId}/replace": {
+      "post": {
+        "operationId": "replaceShelfEntry",
+        "tags": [
+          "Shelf"
+        ],
+        "summary": "This isn't the right product: swap an entry for the right one",
+        "description": "Guests included. Body `{ productId }`, a named product from `GET /api/v1/products/search`. The entry is taken off the shelf (with the removed reason `wrong-product`, which no other route writes), a wrong-match report is stored for the team, and the product is then added exactly as `POST /api/v1/me/shelf` adds it, with the same answers and the same daily limit: 200 with the entry when the right product is already on the shelf (the wrong one is still removed), or 202 with `{ scanId, itemId }` of a `typed` scan. These are checked first, and none of them removes anything: 404 `SHELF_ENTRY_NOT_FOUND` for an entry that is unknown, removed or another profile's (not told apart), 400 `VALIDATION_FAILED` when `productId` is the entry's own product (that is not a swap), and 404 `PRODUCT_NOT_FOUND` for an unknown or unnamed product. If the add then fails (429 `SCAN_DAILY_LIMIT`, or a provider error), the removal and the report stand and the error is answered as `POST /api/v1/me/shelf` answers it: the wrong product stays off the shelf. That entry is then gone, so asking `/replace` for it again is 404 `SHELF_ENTRY_NOT_FOUND`: after a removal whose add failed, the app should add the right product with `POST /api/v1/me/shelf`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The shelf entry's `id`, from `GET /api/v1/me/shelf`."
+            },
+            "required": true,
+            "description": "The shelf entry's `id`, from `GET /api/v1/me/shelf`.",
+            "name": "entryId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceShelfEntryBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The right product was already on the shelf: its entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ShelfEntry"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "A typed scan was started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AddShelfProductResult"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
             "content": {
               "application/json": {
                 "schema": {

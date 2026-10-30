@@ -360,8 +360,19 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const verdictReportsRepository = once(() => new D1VerdictReportsRepository(db()))
+
   const shelf = once(
-    () => new ShelfService({ repository: new D1ShelfRepository(db()), catalog: catalog(), scans: scans(), now: () => new Date() }),
+    () =>
+      new ShelfService({
+        repository: new D1ShelfRepository(db()),
+        catalog: catalog(),
+        scans: scans(),
+        // Structural, so shelf does not import verdicts: the swap's report goes to the verdicts' report table.
+        wrongMatches: { record: (report, now) => verdictReportsRepository().recordWrongMatch(report, now) },
+        opsAlerts: opsAlerts(),
+        now: () => new Date(),
+      }),
   )
 
   const perfectCorp = once(() => new RestPerfectCorpClient({ apiKey: env.PERFECT_CORP_API_KEY, webhookSecret: env.PERFECT_CORP_WEBHOOK_SECRET, baseUrl: env.PERFECT_CORP_BASE_URL }))
@@ -444,7 +455,7 @@ export const buildContainer = (env: CloudflareBindings) => {
   )
 
   const verdictReports = once(
-    () => new VerdictReportsService({ repository: new D1VerdictReportsRepository(db()), verdicts: verdicts(), opsAlerts: opsAlerts(), now: () => new Date() }),
+    () => new VerdictReportsService({ repository: verdictReportsRepository(), verdicts: verdicts(), opsAlerts: opsAlerts(), now: () => new Date() }),
   )
 
   const routines = once(() => {

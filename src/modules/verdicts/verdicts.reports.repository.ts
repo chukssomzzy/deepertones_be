@@ -8,7 +8,7 @@ import { verdictReports } from './verdicts.table'
 export type VerdictReport = typeof verdictReports.$inferSelect
 
 export type NewMistakeReport = { id: string; profileId: string; entryId: string; group: VerdictGroup; verdict: ShelfVerdict; basis: null; fingerprint: string; note: string | null }
-export type NewWrongMatchReport = { id: string; profileId: string; entryId: string; oldProductId: string; newProductId: string }
+export type NewWrongMatchReport = { id: string; profileId: string; entryId: string; oldProductId: string | null; newProductId: string }
 
 export class D1VerdictReportsRepository {
   constructor(private readonly db: Db) {}
