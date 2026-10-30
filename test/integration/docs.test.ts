@@ -58,8 +58,8 @@ describe('API docs, where DOCS_ENABLED is "true"', () => {
     for (const never of ['products', 'tapers']) expect(preview.properties).not.toHaveProperty(never)
 
     const full = variants.find((variant) => JSON.stringify(lockedOf(variant)) === '[false]')!
-    expect(Object.keys(full.properties!).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
-    expect([...full.required!].sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
+    expect(Object.keys(full.properties!).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'professional', 'status', 'tapers'])
+    expect([...full.required!].sort()).toEqual(['fit', 'groups', 'locked', 'products', 'professional', 'status', 'tapers'])
   })
 
   it('list the origin they are served from first, so "Try it out" never targets production by accident', async () => {

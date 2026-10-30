@@ -53,6 +53,7 @@ const product = (group: VerdictGroup, verdict: ShelfVerdict, over: Partial<Saved
   escalate: false,
   reason: 'A reason the rules wrote.',
   facts: [],
+  basis: [],
   step: null,
   sourceUrls: [],
   ...over,
@@ -76,11 +77,12 @@ const taper = (code: string, kind: TaperKind): TaperRow => ({
 const TAPERS = [taper('TPR-STEROID', 'steroid'), taper('TPR-LIGHTENING', 'lightening-agent')]
 const TAPER_CODE: Record<TaperKind, string> = { steroid: 'TPR-STEROID', 'lightening-agent': 'TPR-LIGHTENING' }
 
-const full = (products: ShownVerdictProduct[]): VerdictView => ({ status: 'ready', locked: false, fit: 'ready', products, tapers: TAPERS })
+type Professional = { whoToSee: string; howSoon: string; whatToTellThem: string }
+const full = (products: ShownVerdictProduct[], professional: Professional | null = null): VerdictView => ({ status: 'ready', locked: false, fit: 'ready', products, tapers: TAPERS, professional })
 
 type FullBody = Extract<ReturnType<typeof toShelfVerdictResponse>, { locked: false }>
 type LockedBody = Extract<ReturnType<typeof toShelfVerdictResponse>, { locked: true }>
-const fullBody = (products: ShownVerdictProduct[]): FullBody => toShelfVerdictResponse(full(products)) as FullBody
+const fullBody = (products: ShownVerdictProduct[], professional: Professional | null = null): FullBody => toShelfVerdictResponse(full(products, professional)) as FullBody
 const lockedBody = (products: ShownVerdictProduct[]): LockedBody => toShelfVerdictResponse(previewOf('ready', products)) as LockedBody
 
 /** The lines shown for one product. */
@@ -165,7 +167,7 @@ describe('toShelfVerdictResponse: groups', () => {
     })
 
     it('adds only `groups` to the body that was there: the status, lock, fit, products and step-downs', () => {
-      expect(Object.keys(fullBody(SHELF())).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'status', 'tapers'])
+      expect(Object.keys(fullBody(SHELF())).sort()).toEqual(['fit', 'groups', 'locked', 'products', 'professional', 'status', 'tapers'])
     })
 
     it('gives the same fixed words on the full verdict as on the preview, whatever the shelf holds', () => {
@@ -387,5 +389,87 @@ describe('toShelfVerdictResponse: suggest', () => {
     it('passes FORBIDDEN_WORDING on every suggest line there can be', () => {
       for (const { where, line } of everyLine()) expectPassesTheGate(line, where)
     })
+  })
+})
+
+// ---- #259 A3: `basis` on each product of the full verdict, and `professional` ----
+// `basis` is saved with the product when the verdict is built and is passed on as it was saved, in the same order; `professional` is the approved about-a-product row
+// (who to see, how soon, what to tell them), or null while the workbook has none. NEITHER is ever on the locked preview. How a basis is made is pinned in
+// verdicts.basis.test.ts; the words of a basis are fixed copy or the workbook's, so they are checked there and not here.
+
+const ONE_OF_EACH = [
+  { kind: 'rule', source: 'ingredient-rule', statement: 'A strong steroid.', sourceUrl: 'https://example.org/rule', reviewerRole: 'a pharmacist', line: 'A strong steroid.' },
+  { kind: 'rule', source: 'claim-word', statement: 'Its name says "x", a claim.', sourceUrl: null, reviewerRole: null, line: 'Its name says "x", a claim.' },
+  { kind: 'told-us', about: 'reaction', line: 'You told us your skin reacted to this product.' },
+  { kind: 'no-label', about: 'unknown-contents', line: 'We cannot see what is in it.' },
+  { kind: 'fit', line: 'Matched against your goal by our checker.' },
+] as const
+const PROFESSIONAL = { whoToSee: 'A pharmacist or a doctor.', howSoon: 'Within a few days.', whatToTellThem: 'The product, how long you used it, and what changed.' }
+
+describe('toShelfVerdictResponse: basis', () => {
+  const basisOfBody = (item: ShownVerdictProduct): unknown => (fullBody([item]).products[0] as { basis?: unknown }).basis
+
+  it('gives each product of the full verdict the basis it was saved with, every kind exactly as saved and in the order saved', () => {
+    const item = product('likely-the-problem', { kind: 'drop' }, { basis: [...ONE_OF_EACH] as never })
+
+    expect(basisOfBody(item)).toEqual(ONE_OF_EACH)
+  })
+
+  it('keeps a null source link and a null reviewer role as null, so the app shows no link and no "Reviewed by" line', () => {
+    const item = product('likely-the-problem', { kind: 'drop' }, { basis: [ONE_OF_EACH[1]] as never })
+
+    const [basis] = basisOfBody(item) as Record<string, unknown>[]
+    expect(basis).toHaveProperty('sourceUrl', null)
+    expect(basis).toHaveProperty('reviewerRole', null)
+  })
+
+  it('gives a product with no basis (the judge has not decided it) an empty list, present, and not a missing field', () => {
+    const item = product('undecided', { kind: 'keep' }, { basis: [] })
+
+    expect(basisOfBody(item)).toEqual([])
+    expect(fullBody([item]).products[0]).toHaveProperty('basis')
+  })
+
+  it('gives each product its own basis, not the first one\'s', () => {
+    const [a, b] = [product('helping', { kind: 'keep' }, { basis: [ONE_OF_EACH[4]] as never }), product('likely-the-problem', { kind: 'drop' }, { basis: [ONE_OF_EACH[0]] as never })]
+
+    expect(fullBody([a, b]).products.map((p) => (p as { basis?: unknown }).basis)).toEqual([[ONE_OF_EACH[4]], [ONE_OF_EACH[0]]])
+  })
+
+  it('is not on the locked preview, which has no products, and none of the words of a basis is in it', () => {
+    const body = lockedBody([product('likely-the-problem', { kind: 'drop' }, { basis: [...ONE_OF_EACH] as never })])
+
+    expect(JSON.stringify(body)).not.toMatch(/basis|reviewerRole|A strong steroid|Matched against your goal|You told us/)
+    expect(body).not.toHaveProperty('products')
+  })
+})
+
+describe('toShelfVerdictResponse: professional', () => {
+  it('is null on the full verdict when the workbook has no approved about-a-product row, present as null and not left out', () => {
+    const body = fullBody(SHELF(), null)
+
+    expect(body).toHaveProperty('professional', null)
+  })
+
+  it('is who to see, how soon and what to tell them when the row is there, and those three fields only', () => {
+    const body = fullBody(SHELF(), { ...PROFESSIONAL })
+
+    expect((body as { professional?: unknown }).professional).toEqual(PROFESSIONAL)
+    expect(Object.keys((body as unknown as { professional: object }).professional).sort()).toEqual(['howSoon', 'whatToTellThem', 'whoToSee'])
+  })
+
+  it('is on a full verdict with no products too', () => {
+    expect(fullBody([], { ...PROFESSIONAL })).toMatchObject({ professional: PROFESSIONAL, products: [] })
+  })
+
+  it('is not on the locked preview, and none of its words is in it', () => {
+    const body = lockedBody(SHELF())
+
+    expect(body).not.toHaveProperty('professional')
+    expect(JSON.stringify(body)).not.toMatch(/whoToSee|howSoon|whatToTellThem/)
+  })
+
+  it('is not on a pending verdict', () => {
+    expect(toShelfVerdictResponse({ status: 'pending' })).toEqual({ status: 'pending' })
   })
 })

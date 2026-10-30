@@ -120,7 +120,7 @@ export const runVerdictEval = async ({ cases: allCases, set, limit, outDir, star
       }
       if (state === 'cut-off') recorded = { id: c.id, state, expect: c.expect, floor: null, fitRequest: null, requestSha256: null, fit: null, products: null, costMicros: 0 }
       else {
-        const merge = (answer: FitResult | null) => mergeVerdict({ floor, fit: answer, entries: inputs.entries, choices }).products
+        const merge = (answer: FitResult | null) => mergeVerdict({ floor, fit: answer, entries: inputs.entries, choices, reference }).products
         let products: VerdictProduct[] | null = null
         try {
           products = merge(fit)

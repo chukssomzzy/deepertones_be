@@ -13,6 +13,22 @@ const VerdictResponse = z
   ])
   .openapi('ShelfVerdictAction', { description: 'What to do with the product: `keep` it, `reduce` it, `stop` it by a step-down, or `drop` it at once.' })
 
+const BasisResponse = z
+  .discriminatedUnion('kind', [
+    z.object({
+      kind: z.literal('rule'),
+      source: z.enum(['ingredient-rule', 'claim-word']).openapi({ description: '`ingredient-rule`: a reviewed rule about an ingredient the product holds. `claim-word`: a reviewed claim word the product\'s name makes.' }),
+      statement: z.string().openapi({ description: 'The rule\'s own words, or for a `claim-word` a fixed sentence naming the word. Shown as it is, and the same as `line`.' }),
+      sourceUrl: z.string().nullable().openapi({ description: 'A link to the source the rule rests on; null when it has none, and then the app shows no link.' }),
+      reviewerRole: z.string().nullable().openapi({ description: 'Who reviewed the rule, e.g. "a consultant dermatologist"; null for a rule stored before contract 2.4.0, and then the app shows no "Reviewed by" line.' }),
+      line: z.string().openapi({ description: 'The line to show, as it is.' }),
+    }),
+    z.object({ kind: z.literal('fit'), line: z.string().openapi({ description: 'The line to show, as it is. Our checker\'s match against the goal, which is not a reviewed rule.' }) }),
+    z.object({ kind: z.literal('told-us'), about: z.enum(['reaction', 'prescription']), line: z.string().openapi({ description: 'The line to show, as it is.' }) }),
+    z.object({ kind: z.literal('no-label'), about: z.enum(['purpose', 'unknown-contents']), line: z.string().openapi({ description: 'The line to show, as it is.' }) }),
+  ])
+  .openapi('ShelfVerdictBasis', { description: 'One reason behind a verdict, for "Where this comes from". Saved with the product when the verdict is built, so a later edit to a rule does not change it.' })
+
 export const VerdictProductResponse = z
   .object({
     entryId: z.string().openapi({ description: 'The shelf entry this is about: its `id` from `GET /api/v1/me/shelf`.' }),
@@ -28,6 +44,7 @@ export const VerdictProductResponse = z
     escalate: z.boolean().openapi({ description: 'True when the user should see a professional about this product.' }),
     sameJobAs: z.string().optional().openapi({ description: 'Only on a `redundant` product: the entry id of the product that stays and does its job.' }),
     nudge: z.literal('photograph-back-label').optional().openapi({ description: 'Only on a `cant-tell` product: what to do to get it read.' }),
+    basis: z.array(BasisResponse).openapi({ description: 'Where the verdict comes from: every reason once, reviewed rules first. Empty for an `undecided` product, which the checker has not answered about yet. Copy awaiting the owner\'s sign-off.' }),
     suggest: z.array(z.string()).min(1).openapi({ description: 'One or more (usually one to three) fixed lines on what to do with the product, worked out from `verdict` alone (and `escalate`, and the `cant-tell` group). Copy awaiting the owner\'s sign-off.' }),
   })
   .openapi('ShelfVerdictProduct')
@@ -49,6 +66,14 @@ export const VerdictTaperResponse = z
     seeAProfessionalIf: z.string(),
   })
   .openapi('ShelfVerdictTaper')
+
+const ProfessionalResponse = z
+  .object({
+    whoToSee: z.string().openapi({ description: 'What kind of professional to see.' }),
+    howSoon: z.string().openapi({ description: 'How soon to see them.' }),
+    whatToTellThem: z.string().openapi({ description: 'What to tell them.' }),
+  })
+  .openapi('ShelfVerdictProfessional')
 
 const GroupCounts = z
   .object({
@@ -99,6 +124,7 @@ export const ShelfVerdictResponse = z
       groups: GROUP_LIST,
       products: z.array(VerdictProductResponse).openapi({ description: 'One per skin-care product on the shelf, in shelf order.' }),
       tapers: z.array(VerdictTaperResponse).openapi({ description: 'The step-downs the `stop` verdicts use, each once.' }),
+      professional: ProfessionalResponse.nullable().openapi({ description: '"Talk to a professional" about a product: who to see, how soon and what to tell them, from the reviewed workbook. Null until the team has imported it. Never on the locked preview.' }),
     }),
   ])
   .openapi('ShelfVerdict')

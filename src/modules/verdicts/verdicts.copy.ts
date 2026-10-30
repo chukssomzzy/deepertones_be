@@ -82,3 +82,17 @@ const plain = (group: IngredientGroup): string => group.replaceAll('-', ' ')
 /** The reason for the one product of a clashing pair that is reduced: its own group first, the other product's second. */
 export const clashReason = ([own, other]: [IngredientGroup, IngredientGroup]): string =>
   `Best used on alternate days, because its ${plain(own)} works against the ${plain(other)} in another product on the shelf.`
+
+// --- Copy awaiting the owner's sign-off ---
+// "Where this comes from" (spec #259, screen 7.1): the fixed line of each basis that is not a reviewed rule's own words. Here and not in verdicts.screen-copy.ts,
+// which imports the merge that builds a basis (a cycle). About the product, never the person, and no line calls the checker's fit a reviewed rule, which it is not.
+// Every one passes FORBIDDEN_WORDING (pinned in verdicts.basis.test.ts).
+export const TOLD_US_REACTION_LINE = 'You told us your skin reacted to this product.'
+export const TOLD_US_PRESCRIPTION_LINE = 'You told us a doctor prescribed this.'
+export const NO_LABEL_PURPOSE_LINE = 'You told us this product is for lightening, and we cannot see what is in it, so we treat it with caution. This is about the product, not about you.'
+export const NO_LABEL_UNKNOWN_LINE = 'We cannot see what is in this product, so we treat it with caution. This is about the product, not about you.'
+export const FIT_LINE = 'Matched against your goal by our checker.'
+
+// The phrase is the workbook's own word, which can itself be one the wording gate forbids ("whitening"), so only the words around it are gated: they say what the
+// phrase is without using a forbidden one.
+export const claimWordStatement = (phrase: string): string => `Its name says "${phrase}", a claim about changing skin colour.`

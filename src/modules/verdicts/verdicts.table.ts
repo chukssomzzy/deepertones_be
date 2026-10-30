@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm'
 import { index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 import { profiles } from '../profiles/profiles.table'
 import type { ShelfVerdict } from '../routines/routines.types'
+import type { Basis } from './verdicts.basis'
 import type { VerdictGroup } from './verdicts.merge'
 import type { SavedVerdictProduct, VerdictProvenance } from './verdicts.types'
 
@@ -48,7 +49,7 @@ export const shelfVerdicts = sqliteTable(
 /**
  * What a person told the team about a shelf verdict (spec #259). Nothing in the product reads these rows: the team reads the table, and a report never changes a verdict.
  * A `mistake` is a person saying a product's verdict looks wrong: `group`, `verdict` (the internal verdict action, with the step-down's template id) and `fingerprint` are what they
- * were shown, so it can be reproduced; `basis` is for what the verdict was built on and is null until that is stored. A repeat for the same entry and fingerprint updates the one row
+ * were shown, so it can be reproduced, and `basis` is the product's saved basis (where its verdict comes from, as the person was shown it). A repeat for the same entry and fingerprint updates the one row
  * (its `note` and `updated_at`), which a partial unique index over `kind = 'mistake'` holds; a rebuilt verdict has another fingerprint and so a new report. A `wrong-match` is
  * written when a person swaps the product their shelf entry was matched to: `old_product_id` and `new_product_id`, and none of the mistake columns; any number may exist.
  * `note` is private to the person and the team: it is never logged and never sent anywhere. `entry_id` is a plain column, not a key, so a report outlives its entry.
@@ -65,7 +66,7 @@ export const verdictReports = sqliteTable(
     kind: text('kind', { enum: ['mistake', 'wrong-match'] }).notNull(),
     group: text('group').$type<VerdictGroup>(),
     verdict: text('verdict', { mode: 'json' }).$type<ShelfVerdict>(),
-    basis: text('basis', { mode: 'json' }).$type<Record<string, unknown>>(),
+    basis: text('basis', { mode: 'json' }).$type<Basis[]>(),
     fingerprint: text('fingerprint'),
     note: text('note'),
     oldProductId: text('old_product_id'),

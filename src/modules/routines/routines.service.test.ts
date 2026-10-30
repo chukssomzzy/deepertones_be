@@ -165,6 +165,7 @@ const verdictProduct = (entryId: string, verdict: ShelfVerdict, step: RoutineSte
   escalate: false,
   reason: 'A test reason.',
   facts: [],
+  basis: [],
   step,
   sourceUrls: [],
   ...over,
@@ -431,7 +432,7 @@ beforeEach(() => {
       // The step-down templates the carry reads the length of (#259 B4); a code the workbook does not hold is absent from the map.
       tapersByCode: async (codes: string[]) => new Map(codes.flatMap((code): [string, TaperRow][] => (world.templates.has(code) ? [[code, structuredClone(world.templates.get(code)!)]] : []))),
       // Where the catalog version a routine records comes from.
-      verdictReference: async () => ({ rulesVersion: 'verdict-rules-7', catalogVersion, rules: [], claimPhrases: [], tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } }),
+      verdictReference: async () => ({ rulesVersion: 'verdict-rules-7', catalogVersion, rules: [], claimPhrases: [], claimWords: [], tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } }),
     } satisfies Pick<CatalogWorkbookService, 'countries' | 'verdictReference' | 'tapersByCode'>,
     profiles: {
       find: async (profileId: string) => {

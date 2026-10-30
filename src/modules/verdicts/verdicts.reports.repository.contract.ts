@@ -6,7 +6,7 @@ import type { VerdictReportsRepository } from './verdicts.reports.repository'
 //
 // THE CONTRACT THIS FILE PINS (assumed: the brief names the table, its columns and the two writes, not the method signatures; they follow skin-care.holds.repository.ts):
 //   upsertMistake(report, now): Promise<{ id: string; created: boolean }>
-//       report = { id, profileId, entryId, group, verdict, basis: null, fingerprint, note: string | null }; the caller makes the id and passes the time.
+//       report = { id, profileId, entryId, group, verdict, basis (the product's saved Basis[]), fingerprint, note: string | null }; the caller makes the id and passes the time.
 //       A report is unique per (profileId, entryId, fingerprint) among `mistake` reports (a PARTIAL unique index where kind = 'mistake'). The first one stores a row with
 //       kind 'mistake', createdAt = updatedAt = now, no old or new product, and answers { id: <the offered id>, created: true }. A repeat for the same triple writes no row:
 //       it sets the row's note to the offered note (null included) and its updatedAt to the new `now`, keeps its id, createdAt, group, verdict and fingerprint, and answers
@@ -42,7 +42,7 @@ const mistakeFor = (profileId: string, over: Partial<Mistake> = {}): Mistake => 
   entryId: 'entry-1',
   group: 'helping',
   verdict: { kind: 'keep' },
-  basis: null,
+  basis: [{ kind: 'fit', line: 'A fit check of the product against your goal.' }],
   fingerprint: FP_1,
   note: 'This cream is not what I use',
   ...over,
@@ -60,7 +60,7 @@ const wrongMatchFor = (profileId: string, over: Partial<WrongMatch> = {}): Wrong
 export const verdictReportsRepositoryContract = (name: string, make: () => VerdictReportsContractSetup | Promise<VerdictReportsContractSetup>) => {
   describe(`VerdictReportsRepository contract: ${name}`, () => {
     describe('upsertMistake: a new report', () => {
-      it('stores the report whole, as a mistake with no product swap and no basis, stamped with the time given, and answers its id as created', async () => {
+      it('stores the report whole, as a mistake with its basis and no product swap, stamped with the time given, and answers its id as created', async () => {
         const { repository, newAccount } = await make()
         const { profileId } = await newAccount()
         const report = mistakeFor(profileId, { entryId: 'entry-7', group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, fingerprint: FP_2, note: 'It is not clashing' })
@@ -74,7 +74,7 @@ export const verdictReportsRepositoryContract = (name: string, make: () => Verdi
           kind: 'mistake',
           group: 'conflicting',
           verdict: { kind: 'reduce', maxFrequency: 'alternate-days' },
-          basis: null,
+          basis: [{ kind: 'fit', line: 'A fit check of the product against your goal.' }],
           fingerprint: FP_2,
           note: 'It is not clashing',
           oldProductId: null,
@@ -152,7 +152,7 @@ export const verdictReportsRepositoryContract = (name: string, make: () => Verdi
           kind: 'mistake',
           group: first.group,
           verdict: first.verdict,
-          basis: null,
+          basis: first.basis,
           fingerprint: first.fingerprint,
           note: 'second thoughts',
           oldProductId: null,

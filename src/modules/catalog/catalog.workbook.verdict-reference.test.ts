@@ -46,6 +46,7 @@ describe('verdictRulesOf', () => {
         group: 'steroid',
         clashesWith: ['retinoid'],
         helps: ['hd_redness', 'hd_texture'],
+        reviewerRole: null,
       },
     ])
   })

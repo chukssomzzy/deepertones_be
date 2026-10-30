@@ -8,7 +8,7 @@ import type { Goal } from '../goals/goals.vocabulary'
 import type { ParseState, SafetyMentionRow, SafetyView } from '../safety/safety.types'
 import type { NoLabelPurpose } from '../scans/scans.vocabulary'
 import type { ShelfActiveEntry } from '../shelf/shelf.service'
-import type { FingerprintInput, FingerprintShelfEntry } from './verdicts.fingerprint'
+import { VERDICT_FORMAT_VERSION, type FingerprintInput, type FingerprintShelfEntry } from './verdicts.fingerprint'
 import type { FloorEntry, FloorInput, FloorMention, FloorResult, FloorShelfEntry } from './verdicts.floor'
 import type { VerdictProvenance } from './verdicts.types'
 
@@ -203,6 +203,7 @@ export const fingerprintInputOf = (facts: VerdictFacts, floor: FloorResult): Fin
     scan: scanOf(facts.scan),
     model: facts.fitter.model,
     promptHash: facts.fitter.promptHash,
+    formatVersion: VERDICT_FORMAT_VERSION,
   }
 }
 

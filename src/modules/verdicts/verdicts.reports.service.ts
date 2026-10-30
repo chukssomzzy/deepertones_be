@@ -43,7 +43,7 @@ export class VerdictReportsService {
     const product = saved?.products.find((candidate) => candidate.entryId === entryId)
     if (!saved || !product) throw new NotFoundError('VERDICT_PRODUCT_NOT_FOUND', 'That product is not in your verdict')
     const result = await this.repository.upsertMistake(
-      { id: crypto.randomUUID(), profileId, entryId, group: product.group, verdict: product.verdict, basis: null, fingerprint: saved.fingerprint, note: kept },
+      { id: crypto.randomUUID(), profileId, entryId, group: product.group, verdict: product.verdict, basis: product.basis, fingerprint: saved.fingerprint, note: kept },
       this.now(),
     )
     // One alert per new report; the alert names nothing (not the product, the profile or the note).

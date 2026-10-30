@@ -1,13 +1,14 @@
 import { eq, sql } from 'drizzle-orm'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
+import type { Basis } from './verdicts.basis'
 import type { VerdictGroup } from './verdicts.merge'
 import type { ShelfVerdict } from '../routines/routines.types'
 import { verdictReports } from './verdicts.table'
 
 export type VerdictReport = typeof verdictReports.$inferSelect
 
-export type NewMistakeReport = { id: string; profileId: string; entryId: string; group: VerdictGroup; verdict: ShelfVerdict; basis: null; fingerprint: string; note: string | null }
+export type NewMistakeReport = { id: string; profileId: string; entryId: string; group: VerdictGroup; verdict: ShelfVerdict; basis: Basis[]; fingerprint: string; note: string | null }
 export type NewWrongMatchReport = { id: string; profileId: string; entryId: string; oldProductId: string | null; newProductId: string }
 
 export class D1VerdictReportsRepository {

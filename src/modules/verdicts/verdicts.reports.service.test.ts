@@ -23,7 +23,7 @@ import type { SavedVerdictProduct } from './verdicts.types'
 //       1. a session (401 AUTH_REQUIRED), 2. a verified account (403 SIGNUP_REQUIRED; a guest is turned away before the note is looked at),
 //       3. the note: trimmed, at most 500 characters after trimming, empty or whitespace becomes null (400 VALIDATION_FAILED over 500),
 //       4. the entry is a product of the served verdict (404 VERDICT_PRODUCT_NOT_FOUND: no entry like it, or no served verdict at all).
-//     It then stores a `mistake` report with the product's group and verdict action as saved, the verdict's fingerprint, basis null and the note, through the repository's upsertMistake
+//     It then stores a `mistake` report with the product's group and verdict action as saved, the verdict's fingerprint, the product's saved basis and the note, through the repository's upsertMistake
 //     (the id is made by the service, a UUID). `created` is the repository's: true for a new report, false when it updated the one for the same entry and verdict.
 //     The alert `opsAlerts.raise('verdict-report')` is raised only when a row was created. A report never changes the verdict.
 //     The note is never logged, never in an error, an alert or a job message. A failure logs ids only (or nothing).
@@ -45,7 +45,7 @@ const FINGERPRINT = 'f'.repeat(64)
 const REBUILT_FINGERPRINT = 'e'.repeat(64)
 
 const products = (): SavedVerdictProduct[] => [
-  { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, escalate: false, reason: 'Niacinamide works on dark marks.', facts: [], step: 'treat', sourceUrls: [] },
+  { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, escalate: false, reason: 'Niacinamide works on dark marks.', facts: [], basis: [{ kind: 'fit', line: 'A fit check.' }], step: 'treat', sourceUrls: [] },
   {
     entryId: 'entry-b',
     group: 'likely-the-problem',
@@ -53,10 +53,11 @@ const products = (): SavedVerdictProduct[] => [
     escalate: false,
     reason: 'Holds a steroid, which is stopped step by step.',
     facts: [{ kind: 'ingredient-group', group: 'steroid', ingredient: 'Clobetasol Propionate', ruleName: 'clobetasol propionate' }],
+    basis: [{ kind: 'rule', source: 'ingredient-rule', statement: 'Clobetasol propionate is a steroid, stepped down, never stopped suddenly.', sourceUrl: 'https://example.org/rules/clobetasol', reviewerRole: 'Dermatologist', line: 'Clobetasol propionate is a steroid, stepped down, never stopped suddenly.' }],
     step: null,
     sourceUrls: ['https://example.org/rules/clobetasol'],
   },
-  { entryId: 'entry-c', group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, escalate: false, reason: 'Clashes with the acid.', facts: [], step: 'treat', sourceUrls: [] },
+  { entryId: 'entry-c', group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, escalate: false, reason: 'Clashes with the acid.', facts: [], basis: [{ kind: 'fit', line: 'A fit check.' }], step: 'treat', sourceUrls: [] },
 ]
 
 const savedView = (over: Partial<SavedVerdictView> = {}): SavedVerdictView => ({ fingerprint: FINGERPRINT, fit: 'ready', builtAt: at(-HOUR), rulesVersion: 'rules-v1', products: products(), ...over })
@@ -127,7 +128,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('VerdictReportsService.reportMistake: reporting a product of the verdict', () => {
-  it('stores a mistake report with the product\'s group and verdict as saved, the verdict\'s fingerprint, no basis and the note, and answers its id as created', async () => {
+  it('stores a mistake report with the product\'s group and verdict as saved, the verdict\'s fingerprint, its saved basis and the note, and answers its id as created', async () => {
     const answer = await report('entry-b', 'This is not a steroid cream')
 
     expect(answer).toEqual({ id: expect.any(String), created: true })
@@ -138,7 +139,7 @@ describe('VerdictReportsService.reportMistake: reporting a product of the verdic
       kind: 'mistake',
       group: 'likely-the-problem',
       verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' },
-      basis: null,
+      basis: [{ kind: 'rule', source: 'ingredient-rule', statement: 'Clobetasol propionate is a steroid, stepped down, never stopped suddenly.', sourceUrl: 'https://example.org/rules/clobetasol', reviewerRole: 'Dermatologist', line: 'Clobetasol propionate is a steroid, stepped down, never stopped suddenly.' }],
       fingerprint: FINGERPRINT,
       note: 'This is not a steroid cream',
       oldProductId: null,

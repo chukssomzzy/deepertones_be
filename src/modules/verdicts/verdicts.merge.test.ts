@@ -11,10 +11,10 @@ import { mergeVerdict, type VerdictProduct } from './verdicts.merge'
 // apply only to products the floor left open; a clash is applied only when both its products survive; and no step ever moves a product to a less strict group.
 //
 // Shapes assumed (the contract this file pins):
-//   mergeVerdict({ floor, fit, entries, choices? }) => { fit: 'ready' | 'not-ready', products: VerdictProduct[] }
+//   mergeVerdict({ floor, fit, entries, choices?, reference }) => { fit: 'ready' | 'not-ready', products: VerdictProduct[] }
 //   `entries` is the shelf in its order (anything with an `id` and a `category`, so the FloorShelfEntry list the floor was given is passed as it is). The output
 //   is the skin products of it, in that order. `choices` is the profile's safety choices (default none), which the stop copy reads (prescription note).
-//   VerdictProduct = { entryId, group, verdict, escalate, reason, facts, sameJobAs?, nudge? }; `facts` is the floor's facts for a fixed product and [] for any other.
+//   VerdictProduct = { entryId, group, verdict, escalate, reason, facts, basis, sameJobAs?, nudge? } (`basis` is pinned in verdicts.basis.test.ts; `reference` is { rules, claimWords }); `facts` is the floor's facts for a fixed product and [] for any other.
 //   A product entry carries `step: RoutineStep | null` (its catalog routine step); a product at 'protect' is a sunscreen, and a clash never reduces one: when the
 //   judge names the sunscreen the merge reduces the other member of the pair. How the merge learns it (a field of the floor's clash, say) is the implementer's.
 // Expected values are literals worked out from the spec; the floor is the real one, so every state here is one the product can reach.
@@ -33,9 +33,13 @@ const RULES: FloorRule[] = [
 const CLAIMS = ['lightening', 'whitening', 'bleaching']
 const TAPERS = { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } as const
 
-function rule(over: Partial<FloorRule> & Pick<FloorRule, 'name' | 'kind'>): FloorRule {
-  return { aliases: [], rule: `${over.name} (test rule)`, source: null, group: null, clashesWith: [], ...over }
+function rule(over: Partial<FloorRule> & Pick<FloorRule, 'name' | 'kind'>): FloorRule & { reviewerRole: string | null } {
+  return { aliases: [], rule: `${over.name} (test rule)`, source: null, group: null, clashesWith: [], reviewerRole: null, ...over }
 }
+
+// What the merge reads of the workbook to say where each verdict came from (#259 A3): the same rules the floor was given, and the approved claim words. How each
+// basis comes out of it is pinned in verdicts.basis.test.ts; here it only has to be there.
+const REFERENCE = { rules: RULES, claimWords: CLAIMS.map((phrase) => ({ phrase, sourceUrl: null, reviewerRole: null })) }
 
 const product = (id: string, ingredients: string[], over: Partial<Extract<FloorShelfEntry, { kind: 'product' }>> = {}): FloorShelfEntry => ({
   id,
@@ -93,7 +97,7 @@ type MergeOver = FloorOver & { choices?: SafetyChoice[] }
 /** The real floor over the shelf, then the merge of it with `fit`. Everything handed to the merge is frozen, so a merge that edits its input throws. */
 const merge = (shelf: FloorShelfEntry[], fit: FitResult | null, over: MergeOver = {}) => {
   const floor = floorOf(shelf, over)
-  return mergeVerdict(deepFreeze({ floor, fit, entries: shelf, ...(over.choices ? { choices: over.choices } : {}) }))
+  return mergeVerdict(deepFreeze({ floor, fit, entries: shelf, reference: REFERENCE, ...(over.choices ? { choices: over.choices } : {}) }))
 }
 const entryOf = (result: ReturnType<typeof merge>, id: string): VerdictProduct => {
   const found = result.products.find((p) => p.entryId === id)
@@ -110,7 +114,7 @@ describe('mergeVerdict: a product the floor decided', () => {
   it('keeps a prescribed product as prescribed and kept, whatever else it holds, with the floor\'s fact and no model words', () => {
     const result = merge([product('rx', ['Aqua', 'Clobetasol']), product('cream', ['Aqua'])], fitOf([helping('cream')]), { mentions: [prescribed('prod-rx')] })
 
-    expect(entryOf(result, 'rx')).toEqual({ entryId: 'rx', group: 'prescribed', verdict: { kind: 'keep' }, escalate: false, facts: [{ kind: 'prescription' }], reason: expect.any(String) })
+    expect(entryOf(result, 'rx')).toEqual({ entryId: 'rx', group: 'prescribed', verdict: { kind: 'keep' }, escalate: false, facts: [{ kind: 'prescription' }], basis: expect.any(Array), reason: expect.any(String) })
     expect(entryOf(result, 'rx').reason).not.toContain(AI)
   })
 
@@ -123,6 +127,7 @@ describe('mergeVerdict: a product the floor decided', () => {
       verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' },
       escalate: false,
       facts: [{ kind: 'ingredient-group', group: 'steroid', ingredient: 'Clobetasol', ruleName: 'clobetasol propionate' }],
+      basis: expect.any(Array),
       reason: expect.stringContaining('Clobetasol'),
     })
   })
@@ -223,19 +228,19 @@ describe('mergeVerdict: a product the floor left open', () => {
   it('takes the model\'s label and reason: helping is kept', () => {
     const result = merge([product('cream', ['Aqua'])], fitOf([helping('cream')]))
 
-    expect(entryOf(result, 'cream')).toEqual({ entryId: 'cream', group: 'helping', verdict: { kind: 'keep' }, escalate: false, facts: [], reason: `${AI} cream helps` })
+    expect(entryOf(result, 'cream')).toEqual({ entryId: 'cream', group: 'helping', verdict: { kind: 'keep' }, escalate: false, facts: [], basis: expect.any(Array), reason: `${AI} cream helps` })
   })
 
   it('takes the model\'s label and reason: blocking the goal is dropped, never stopped', () => {
     const result = merge([product('toner', ['Aqua'])], fitOf([blocking('toner')]))
 
-    expect(entryOf(result, 'toner')).toEqual({ entryId: 'toner', group: 'blocking', verdict: { kind: 'drop' }, escalate: false, facts: [], reason: `${AI} toner blocks` })
+    expect(entryOf(result, 'toner')).toEqual({ entryId: 'toner', group: 'blocking', verdict: { kind: 'drop' }, escalate: false, facts: [], basis: expect.any(Array), reason: `${AI} toner blocks` })
   })
 
   it('takes the model\'s label and reason: redundant is dropped and names the product that does its job', () => {
     const result = merge([product('a', ['Aqua']), product('b', ['Aqua', 'Glycerin'])], fitOf([helping('a'), redundant('b', 'a')]))
 
-    expect(entryOf(result, 'b')).toEqual({ entryId: 'b', group: 'redundant', verdict: { kind: 'drop' }, escalate: false, facts: [], reason: `${AI} b repeats`, sameJobAs: 'a' })
+    expect(entryOf(result, 'b')).toEqual({ entryId: 'b', group: 'redundant', verdict: { kind: 'drop' }, escalate: false, facts: [], basis: expect.any(Array), reason: `${AI} b repeats`, sameJobAs: 'a' })
   })
 
   it('lets a redundant product name a prescribed product as the one that does its job', () => {
@@ -314,7 +319,7 @@ describe('mergeVerdict: no fit answer (the judge failed, was refused, or has not
 
     expect(result.fit).toBe('not-ready')
     for (const id of ['a', 'b']) {
-      expect(entryOf(result, id)).toEqual({ entryId: id, group: 'undecided', verdict: { kind: 'keep' }, escalate: false, facts: [], reason: expect.any(String) })
+      expect(entryOf(result, id)).toEqual({ entryId: id, group: 'undecided', verdict: { kind: 'keep' }, escalate: false, facts: [], basis: expect.any(Array), reason: expect.any(String) })
       expect(entryOf(result, id).reason.trim()).not.toBe('')
     }
   })
@@ -354,7 +359,7 @@ describe('mergeVerdict: a clashing pair', () => {
 
     const result = merge(CLASH_SHELF(), fitOf([helping('serum'), helping('toner'), helping('cream')], [{ ids: PAIR, reduceId: 'serum' }]))
 
-    expect(entryOf(result, 'serum')).toEqual({ entryId: 'serum', group: 'conflicting', verdict: REDUCED, escalate: false, facts: [], reason: expect.any(String) })
+    expect(entryOf(result, 'serum')).toEqual({ entryId: 'serum', group: 'conflicting', verdict: REDUCED, escalate: false, facts: [], basis: expect.any(Array), reason: expect.any(String) })
     expect(entryOf(result, 'serum').reason).not.toContain(AI)
     expect(entryOf(result, 'toner')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
     expect(entryOf(result, 'cream')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
@@ -402,7 +407,7 @@ describe('mergeVerdict: a clashing pair', () => {
   it('never loosens a drop: the product the model named to reduce, if it also blocked it, stays blocking and dropped', () => {
     const result = merge(CLASH_SHELF(), fitOf([helping('serum'), blocking('toner'), helping('cream')], [{ ids: PAIR, reduceId: 'toner' }]))
 
-    expect(entryOf(result, 'toner')).toEqual({ entryId: 'toner', group: 'blocking', verdict: { kind: 'drop' }, escalate: false, facts: [], reason: `${AI} toner blocks` })
+    expect(entryOf(result, 'toner')).toEqual({ entryId: 'toner', group: 'blocking', verdict: { kind: 'drop' }, escalate: false, facts: [], basis: expect.any(Array), reason: `${AI} toner blocks` })
   })
 
   it('does nothing when both members are dropped', () => {
@@ -436,7 +441,7 @@ describe('mergeVerdict: a clashing pair', () => {
     const result = merge(shelf, fitOf([helping('serum'), helping('toner'), helping('peel')], [{ ids: ['serum', 'toner'], reduceId: 'serum' }, { ids: ['serum', 'peel'], reduceId: 'serum' }]))
 
     expect(result.products.filter((p) => p.verdict.kind === 'reduce').map((p) => p.entryId)).toEqual(['serum'])
-    expect(entryOf(result, 'serum')).toEqual({ entryId: 'serum', group: 'conflicting', verdict: REDUCED, escalate: false, facts: [], reason: expect.stringMatching(/alternate days.*retinoid.*exfoliating acid/i) })
+    expect(entryOf(result, 'serum')).toEqual({ entryId: 'serum', group: 'conflicting', verdict: REDUCED, escalate: false, facts: [], basis: expect.any(Array), reason: expect.stringMatching(/alternate days.*retinoid.*exfoliating acid/i) })
     expect(entryOf(result, 'toner')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
     expect(entryOf(result, 'peel')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
   })
@@ -581,7 +586,7 @@ describe('mergeVerdict: the order, and what it does not touch', () => {
     const shelf = [product('a', ['Aqua']), product('b', ['Aqua']), product('c', ['Aqua'])]
     const floor = floorOf(shelf)
 
-    const result = mergeVerdict({ floor, fit: fitOf([helping('a'), helping('b'), helping('c')]), entries: [shelf[2]!, shelf[0]!, shelf[1]!] })
+    const result = mergeVerdict({ floor, fit: fitOf([helping('a'), helping('b'), helping('c')]), entries: [shelf[2]!, shelf[0]!, shelf[1]!], reference: REFERENCE })
 
     expect(result.products.map((p) => p.entryId)).toEqual(['c', 'a', 'b'])
   })
@@ -675,7 +680,7 @@ describe('mergeVerdict: stricter only (generated shelves, floors and fit answers
       }
 
       const label = `seed ${seed}`
-      const result = mergeVerdict({ floor, fit, entries: shelf })
+      const result = mergeVerdict({ floor, fit, entries: shelf, reference: REFERENCE })
       const skin = shelf.filter((e) => e.category === 'skin').map((e) => e.id)
       expect(result.products.map((p) => p.entryId), label).toEqual(skin)
 

@@ -38,7 +38,7 @@ const FP_2 = 'fingerprint-2'
 
 // One of each verdict the routine reads, so a JSON column cannot quietly drop a variant, with a step and sources on some and none on others.
 const productsOf = (): SavedVerdictProduct[] => [
-  { entryId: 'entry-1', group: 'helping', verdict: { kind: 'keep' }, escalate: false, reason: 'Niacinamide works on dark marks.', facts: [], step: 'treat', sourceUrls: [] },
+  { entryId: 'entry-1', group: 'helping', verdict: { kind: 'keep' }, escalate: false, reason: 'Niacinamide works on dark marks.', facts: [], basis: [{ kind: 'fit', line: 'Matched against your goal by our checker.' }], step: 'treat', sourceUrls: [] },
   {
     entryId: 'entry-2',
     group: 'conflicting',
@@ -46,6 +46,7 @@ const productsOf = (): SavedVerdictProduct[] => [
     escalate: false,
     reason: 'Clashes with the acid on your shelf.',
     facts: [],
+    basis: [{ kind: 'fit', line: 'Matched against your goal by our checker.' }],
     step: 'treat',
     sourceUrls: ['https://example.org/rules/retinol'],
   },
@@ -56,6 +57,10 @@ const productsOf = (): SavedVerdictProduct[] => [
     escalate: false,
     reason: 'Holds a steroid, which is stopped step by step.',
     facts: [{ kind: 'ingredient-group', group: 'steroid', ingredient: 'Clobetasol Propionate', ruleName: 'clobetasol propionate' }],
+    basis: [
+      { kind: 'rule', source: 'ingredient-rule', statement: 'A strong steroid.', sourceUrl: 'https://example.org/rules/clobetasol', reviewerRole: null, line: 'A strong steroid.' },
+      { kind: 'told-us', about: 'reaction', line: 'You told us your skin reacted to this product.' },
+    ],
     step: null,
     sourceUrls: ['https://example.org/rules/clobetasol', 'https://example.org/rules/steroids'],
   },
@@ -66,11 +71,12 @@ const productsOf = (): SavedVerdictProduct[] => [
     escalate: false,
     reason: 'We cannot tell what is in it.',
     facts: [{ kind: 'unknown-contents' }],
+    basis: [{ kind: 'no-label', about: 'unknown-contents', line: 'We cannot see what is in this product, so we treat it with caution.' }],
     nudge: 'photograph-back-label',
     step: null,
     sourceUrls: [],
   },
-  { entryId: 'entry-5', group: 'redundant', verdict: { kind: 'drop' }, escalate: false, reason: 'Does the same job as entry 1.', facts: [], sameJobAs: 'entry-1', step: 'moisturise', sourceUrls: [] },
+  { entryId: 'entry-5', group: 'redundant', verdict: { kind: 'drop' }, escalate: false, reason: 'Does the same job as entry 1.', facts: [], basis: [], sameJobAs: 'entry-1', step: 'moisturise', sourceUrls: [] },
 ]
 
 // The provenance: what the build read. Ids and codes only, never the words the user typed.

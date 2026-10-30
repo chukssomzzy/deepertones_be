@@ -12,6 +12,12 @@ import type { FloorRule } from './verdicts.floor'
 // read (the global catalog version, so a Products-only upload re-bills nothing) cannot leak in, and anything that only says when or where a row was stored
 // (ids, times, positions) is left out so a re-save of identical answers hashes the same.
 
+/**
+ * The shape of a saved verdict. Bump it when the shape changes (a field every saved product must now carry): every verdict saved before is then stale once and
+ * rebuilt on its next read, at the cost of one fit call for each shelf with a product the floor leaves open. 1 added each product's `basis` (spec #259).
+ */
+export const VERDICT_FORMAT_VERSION = 1
+
 type ShelfBase = { id: string; category: Category; brand: string | null; name: string; variant: string | null }
 
 export type FingerprintShelfEntry = ShelfBase & ({ kind: 'product'; formulationId: string } | { kind: 'no-label'; noLabelPurpose: NoLabelPurpose })
@@ -30,6 +36,7 @@ export type FingerprintInput = {
   scan: { skinType: SkinTypeLabel | null; concerns: readonly { concern: ShownConcern; band: Band }[] } | null
   model: string
   promptHash: string
+  formatVersion: number
 }
 
 const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
@@ -88,5 +95,6 @@ export const verdictFingerprint = (input: FingerprintInput): Promise<string> =>
       },
       model: input.model,
       promptHash: input.promptHash,
+      formatVersion: input.formatVersion,
     }),
   )

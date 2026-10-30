@@ -28,7 +28,7 @@ describe('verdict_reports in D1', () => {
     entryId: 'entry-1',
     group: 'helping' as const,
     verdict: { kind: 'keep' as const },
-    basis: null,
+    basis: [{ kind: 'fit' as const, line: 'A fit check of the product against your goal.' }],
     fingerprint: 'fingerprint-1',
     note: 'a note',
     ...over,
