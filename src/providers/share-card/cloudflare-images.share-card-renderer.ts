@@ -77,8 +77,10 @@ export class CloudflareImagesShareCardRenderer implements ShareCardRenderer {
       let card = this.images.input(streamOf(solidPixelPng(canvas.background))).transform({ width: canvas.width, height: canvas.height, fit: 'squeeze' })
       card = card.draw(this.photo(before, layout.photos.before, canvas.background), at(layout.photos.before.rect))
       card = card.draw(this.photo(after, layout.photos.after, canvas.background), at(layout.photos.after.rect))
-      for (const { text, rect, size, color } of layout.labels) card = card.draw(this.images.text(text, { font: { url: this.fontUrl }, size, color }), at(rect))
+      // Every image before any text: the binding draws image overlays before text overlays but keeps the positions in the order given, so a text drawn before an image
+      // would take that image's place (seen on the real binding, 2026-10-30: the logo landed on the "Day 1" band).
       card = card.draw(this.images.input(streamOf(logo.bytes)).transform({ width: layout.logo.rect.width, height: layout.logo.rect.height }), at(layout.logo.rect))
+      for (const { text, rect, size, color } of layout.labels) card = card.draw(this.images.text(text, { font: { url: this.fontUrl }, size, color }), at(rect))
       const result = await card.output({ format: 'image/png' })
       return { bytes: new Uint8Array(await new Response(result.image()).arrayBuffer()), mediaType: 'image/png' }
     } catch (error) {

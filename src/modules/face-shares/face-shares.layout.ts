@@ -8,7 +8,8 @@ const LABEL_GAP = 8
 const SECTION_GAP = 24
 const LABEL_SIZE = 30
 // Cloudflare documents the text size in points in its types and in pixels on its docs page, so a band must hold the larger reading: points to pixels is 4/3, a line is
-// taken as 1.5 times that, and there is padding above and below. The staging check confirms where the glyphs really land.
+// taken as 1.5 times that, and there is padding above and below. Checked on the real binding (2026-10-30): the size is in pixels (size 30 draws glyphs 27 px tall, "y" included),
+// placed at the band's top left, so the band has room to spare.
 const LABEL_LINE_PX = Math.ceil(Math.ceil((LABEL_SIZE * 4) / 3) * 1.5)
 const LABEL_PADDING = 6
 const LABEL_HEIGHT = LABEL_LINE_PX + 2 * LABEL_PADDING
